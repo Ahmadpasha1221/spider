@@ -1,6 +1,19 @@
-import type { AuthStatus, FileChangeView, LocalModel, LocalProvider, ModelInfo, RuntimeProvider, SessionListItem } from "./protocol";
+import type {
+  AuthStatus,
+  ExtensionInfoView,
+  FileChangeView,
+  LocalModel,
+  LocalProvider,
+  ModelInfo,
+  PermissionRule,
+  PermissionRuleCategory,
+  RuntimeProvider,
+  SessionListItem,
+} from "./protocol";
 
 export type AppView = "chat" | "history" | "settings";
+/** Sections inside the redesigned Settings page. */
+export type SettingsSection = "models" | "behaviour" | "autoApprove" | "indexing" | "about";
 
 /** Live agent execution phase, derived only from backend runtime events. */
 export type AgentPhase = "idle" | "submitting" | "streaming" | "toolRunning" | "completed" | "failed" | "cancelled";
@@ -34,6 +47,8 @@ export interface ChatLine {
     detail?: string;
     error?: string;
   };
+  /** Artifact card: a meaningful file change produced by the agent. */
+  artifact?: FileChangeView;
   fileChange?: FileChangeView;
 }
 
@@ -69,6 +84,14 @@ export interface AppState {
   lastPrompt?: string;
   usage?: { promptTokens: number; completionTokens: number; totalTokens: number; costUsd?: number };
   modelCapabilities?: { streaming: boolean; toolCalling: boolean; reasoning?: boolean };
+  /** Composer shield state (backend authoritative; GUI mirrors it). */
+  autoApproveEnabled: boolean;
+  autoApproveScope: "conversation" | "runtime";
+  permissionRules: Partial<Record<PermissionRuleCategory, PermissionRule>>;
+  permissionRulesLoaded: boolean;
+  extensionInfo?: ExtensionInfoView;
+  /** Currently open section of the redesigned Settings page. */
+  settingsSection: SettingsSection;
 }
 
 export function createInitialState(): AppState {
@@ -90,6 +113,11 @@ export function createInitialState(): AppState {
     sessions: [],
     pendingNewConversation: false,
     messages: [],
+    autoApproveEnabled: false,
+    autoApproveScope: "conversation",
+    permissionRules: {},
+    permissionRulesLoaded: false,
+    settingsSection: "models",
   };
 }
 

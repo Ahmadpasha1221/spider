@@ -1,6 +1,7 @@
 import { onHostMessage, postToHost } from "./bridge";
-import type { FileChangeView, HostToGui, RuntimeProvider, SessionListItem } from "./protocol";
-import { AppState, ChatLine, createInitialState, phaseFromAgentState } from "./state";
+import { createStreamCoalescer } from "./streamCoalescer";
+import type { HostToGui, RuntimeProvider, SessionListItem, PermissionRule, PermissionRuleCategory } from "./protocol";
+import { AppState, ChatLine, createInitialState, phaseFromAgentState, type SettingsSection } from "./state";
 import { createComposer } from "./components/composer";
 import { createHistoryList } from "./components/historyList";
 import { createMessageList } from "./components/messageList";
@@ -9,6 +10,24 @@ import { renderChatView } from "./views/chatView";
 import { renderSettingsView } from "./views/settingsView";
 
 const state: AppState = createInitialState();
+
+/**
+ * Host-message coalescing for assistant text deltas: chunks arrive per token
+ * from the runtime; the coalescer releases them to the message list every
+ * ~110ms so the DOM is touched at a steady visual cadence, not per event.
+ * The message list accumulates internally too — the two layers together keep
+ * per-second DOM writes bounded regardless of provider chunk size.
+ */
+let deltaCoalescer = createStreamCoalescer((text) => {
+  messageList.upsertStreamingLine(text);
+});
+
+function resetDeltaCoalescer(): void {
+  deltaCoalescer.close();
+  deltaCoalescer = createStreamCoalescer((text) => {
+    messageList.upsertStreamingLine(text);
+  });
+}
 
 /**
  * Transcript staleness guard. A transcript reply is only applied when it is
@@ -44,11 +63,14 @@ const messageList = createMessageList(messageListRoot, {
   onViewDiff: (changeId) => postToHost({ type: "OPEN_DIFF", changeId }),
   onAcceptChange: (changeId) => postToHost({ type: "RESOLVE_FILE_CHANGE", changeId, decision: "ACCEPT" }),
   onRejectChange: (changeId) => postToHost({ type: "RESOLVE_FILE_CHANGE", changeId, decision: "REJECT" }),
+  onOpenArtifact: (path) => postToHost({ type: "OPEN_FILE", path }),
 });
 const composer = createComposer(composerRoot, {
   onSend: handleSend,
   onCancel: cancelRun,
   onRetry: retryLastPrompt,
+  onModelSelect: selectModelFromComposer,
+  onToggleAutoApprove: toggleAutoApprove,
 });
 const sessionBar = createSessionBar(sessionBarRoot, {
   onSelect: (sessionId) => selectSession(sessionId),
@@ -88,6 +110,8 @@ onHostMessage(handleHostMessage);
 postToHost({ type: "GET_AUTH_STATUS" });
 postToHost({ type: "GET_RUNTIME_STATUS" });
 postToHost({ type: "LIST_SESSIONS" });
+postToHost({ type: "GET_PERMISSION_RULES" });
+postToHost({ type: "GET_EXTENSION_INFO" });
 render();
 
 /**
@@ -204,10 +228,24 @@ function handleHostMessage(message: HostToGui): void {
     case "SESSION_UPDATED":
       applySessionUpdate(message.sessions, message.activeSessionId);
       break;
+    case "AUTO_APPROVE_STATE":
+      // Backend is authoritative: the GUI mirrors whatever it confirms.
+      state.autoApproveEnabled = message.enabled;
+      state.autoApproveScope = message.scope;
+      break;
+    case "PERMISSION_RULES":
+      state.permissionRules = message.rules;
+      state.permissionRulesLoaded = true;
+      break;
+    case "EXTENSION_INFO":
+      state.extensionInfo = message.info;
+      break;
     case "TRANSCRIPT": {
       if (isStaleTranscript(message.sessionId)) {
         break;
       }
+      // A conversation switch discards any in-flight streaming deltas.
+      resetDeltaCoalescer();
       loadedTranscriptSessionId = message.sessionId;
       state.messages = message.entries.map(toChatLine);
       messageList.replaceAll(state.messages);
@@ -218,8 +256,12 @@ function handleHostMessage(message: HostToGui): void {
       applyAgentState(message.state);
       break;
     case "AGENT_MESSAGE": {
+      // Flush pending deltas first so the final message replaces exactly the
+      // text that was already painted (same source, no duplication).
+      deltaCoalescer.close();
       const text = sanitizeAgentMessage(message.message);
       if (text.length === 0) {
+        messageList.finishStreamingLine("");
         break;
       }
       messageList.finishStreamingLine(text);
@@ -235,8 +277,13 @@ function handleHostMessage(message: HostToGui): void {
         // The model leaked a raw tool object into the stream; never show it.
         text = "";
       }
+      if (text.length === 0) {
+        break;
+      }
       state.phase = "streaming";
-      messageList.upsertStreamingLine(text);
+      // Accumulate and paint on the ~110ms cadence; the coalescer flushes
+      // everything on close(), so nothing is lost on finalize.
+      deltaCoalescer.push(text);
       chatLineChanged = true;
       break;
     }
@@ -250,25 +297,30 @@ function handleHostMessage(message: HostToGui): void {
       break;
     case "FILE_CHANGE":
     case "FILE_CHANGE_REVERTED": {
+      // Artifacts: meaningful agent-produced file changes rendered as cards.
       const line: ChatLine = {
         role: "system",
-        text: fileChangeText(message.change, message.type === "FILE_CHANGE_REVERTED"),
-        fileChange: message.change,
+        text: "",
+        artifact: message.change,
       };
       state.messages.push(line);
-      messageList.append([line]);
+      messageList.upsertArtifact(message.change, message.type === "FILE_CHANGE_REVERTED");
       chatLineChanged = true;
       break;
     }
     case "AGENT_THINKING": {
-      const line: ChatLine = { role: "thinking", text: message.message };
-      state.messages.push(line);
-      messageList.append([line]);
+      // Safe status text only (classification gates run in the agent loop).
+      deltaCoalescer.close();
+      messageList.upsertThinkingBlock(message.message, "active");
+      state.phase = "submitting";
       chatLineChanged = true;
       break;
     }
     case "AGENT_TOOL_CALL": {
       // tool_requested: create the execution box; later events update it in place.
+      // Turn boundary: flush any streamed assistant text so it settles before
+      // the tool block (endStreamingTurn inside also resets the segment).
+      deltaCoalescer.close();
       const toolCall = message.toolCall;
       if (toolCall.toolName === "run_command" && toolCall.command) {
         messageList.upsertCommandLine({ command: toolCall.command, running: true, toolCallId: toolCall.toolCallId });
@@ -319,7 +371,9 @@ function handleHostMessage(message: HostToGui): void {
     case "AGENT_ERROR": {
       state.running = false;
       state.phase = "failed";
+      deltaCoalescer.close();
       messageList.finishStreamingLine("");
+      resetDeltaCoalescer();
       const errorLine: ChatLine = { role: "error", text: message.error };
       state.messages.push(errorLine);
       messageList.append([errorLine]);
@@ -382,7 +436,16 @@ function applyAgentState(agentState: string): void {
   state.running = agentState === "starting" || agentState === "ready" || agentState === "running";
   if (["completed", "cancelled", "failed", "disconnected", "idle"].includes(agentState)) {
     state.running = false;
+    // Cancellation/error/interrupt path: flush whatever was painted so the
+    // partial text is finalized cleanly, then reset the delta scheduler.
+    deltaCoalescer.close();
     messageList.finishStreamingLine("");
+    resetDeltaCoalescer();
+  }
+  if (agentState === "starting") {
+    // A new run begins: make sure no stale deltas from a previous run leak
+    // into the upcoming stream.
+    resetDeltaCoalescer();
   }
 }
 
@@ -465,10 +528,7 @@ function render(): void {
       },
       onRefreshOpenRouter: discoverOpenRouterModels,
       onOpenRouterModel: (modelId) => {
-        state.selectedModelId = modelId;
-        state.selectedModelName = state.openRouterModels.find((model) => model.id === modelId)?.name ?? modelId;
-        postToHost({ type: "SELECT_OPENROUTER_MODEL", modelId });
-        render();
+        selectModel(modelId);
       },
       onOpenRouterSearch: (query) => {
         state.openRouterModelFilter = query;
@@ -487,11 +547,7 @@ function render(): void {
         ensureSession();
       },
       onLocalModel: (modelId) => {
-        state.selectedModelId = modelId;
-        state.selectedModelName = modelId;
-        state.lastPrompt = undefined;
-        postToHost({ type: "SELECT_LOCAL_MODEL", modelId });
-        render();
+        selectModel(modelId);
       },
       onMock: () => {
         state.provider = "mock";
@@ -501,8 +557,51 @@ function render(): void {
         ensureSession();
         render();
       },
+      onSelectSection: (section: SettingsSection) => {
+        state.settingsSection = section;
+        render();
+      },
+      onToggleAutoApprove: toggleAutoApprove,
+      onSetPermissionRule: setPermissionRule,
     });
   }
+}
+
+/** Composer fast path: change the active model without opening Settings. */
+function selectModelFromComposer(modelId: string): void {
+  selectModel(modelId);
+  render();
+}
+
+/** One path for model changes: optimistic update + host message. */
+function selectModel(modelId: string): void {
+  if (state.provider === "openrouter") {
+    state.selectedModelId = modelId;
+    state.selectedModelName = state.openRouterModels.find((model) => model.id === modelId)?.name ?? modelId;
+    postToHost({ type: "SELECT_OPENROUTER_MODEL", modelId });
+  } else if (state.provider === "local") {
+    state.selectedModelId = modelId;
+    state.selectedModelName = state.localModels.find((model) => model.id === modelId)?.name ?? modelId;
+    state.lastPrompt = undefined;
+    postToHost({ type: "SELECT_LOCAL_MODEL", modelId });
+  }
+  render();
+}
+
+/**
+ * Shield toggle: optimistic UI flip, then the backend echo (AUTO_APPROVE_STATE)
+ * is authoritative and corrects the state if the host rejected it.
+ */
+function toggleAutoApprove(enabled: boolean): void {
+  state.autoApproveEnabled = enabled;
+  postToHost({ type: "SET_RUNTIME_AUTO_APPROVE", enabled, scope: "conversation" });
+  render();
+}
+
+function setPermissionRule(category: PermissionRuleCategory, rule: PermissionRule): void {
+  state.permissionRules = { ...state.permissionRules, [category]: rule };
+  postToHost({ type: "SET_PERMISSION_RULE", category, rule });
+  render();
 }
 
 function selectProvider(provider: RuntimeProvider): void {
@@ -691,14 +790,6 @@ function sanitizeAgentMessage(text: string): string {
     return "";
   }
   return text;
-}
-
-function fileChangeText(change: FileChangeView, reverted: boolean): string {
-  if (reverted || change.status === "REVERTED") {
-    return `Reverted ${change.path}`;
-  }
-  const kind = change.isNewFile ? "Created" : change.toolName === "edit_file" ? "Edited" : "Wrote";
-  return `${kind} ${change.path} (+${change.additions} −${change.deletions})`;
 }
 
 function mustEl(id: string): HTMLElement {

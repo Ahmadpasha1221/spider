@@ -45,6 +45,11 @@ export type GuiToHost =
   | { type: "USE_MOCK_RUNTIME" }
   | { type: "APPROVE_PERMISSION"; requestId: string }
   | { type: "DENY_PERMISSION"; requestId: string }
+  /** Composer shield: temporary runtime auto-approve (backend authoritative). */
+  | { type: "SET_RUNTIME_AUTO_APPROVE"; enabled: boolean; scope?: "conversation" | "runtime" }
+  | { type: "GET_PERMISSION_RULES" }
+  | { type: "SET_PERMISSION_RULE"; category: PermissionRuleCategory; rule: PermissionRule }
+  | { type: "GET_EXTENSION_INFO" }
   | { type: "OPEN_DIFF"; changeId: string }
   | { type: "RESOLVE_FILE_CHANGE"; changeId: string; decision: "ACCEPT" | "REJECT" }
   | { type: "OPEN_FILE"; path: string };
@@ -55,6 +60,22 @@ export interface SessionListItem {
   workspacePath: string;
   currentTask?: string;
   updatedAt?: number;
+}
+
+/** Categories exposed in Settings → Auto Approve (mirror of src/webview). */
+export type PermissionRuleCategory = "READ" | "MODIFY" | "EXECUTE" | "EXTERNAL" | "DESTRUCTIVE";
+/** Per-category default: auto-allow, always ask, or always deny. */
+export type PermissionRule = "allow" | "ask" | "deny";
+
+/** Static extension metadata for Settings → About Spider. */
+export interface ExtensionInfoView {
+  displayName: string;
+  version: string;
+  publisher: string;
+  license: string;
+  repositoryUrl?: string;
+  activeProvider?: string;
+  activeModelId?: string;
 }
 
 export interface FileChangeView {
@@ -81,6 +102,9 @@ export type HostToGui =
   | { type: "AGENT_ERROR"; error: string }
   | { type: "PERMISSION_REQUEST"; requestId: string; message: string; command?: string; category?: string; destructive?: boolean }
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
+  | { type: "AUTO_APPROVE_STATE"; enabled: boolean; scope: "conversation" | "runtime" }
+  | { type: "PERMISSION_RULES"; rules: Record<PermissionRuleCategory, PermissionRule> }
+  | { type: "EXTENSION_INFO"; info: ExtensionInfoView }
   | { type: "AUTH_STATUS"; status: AuthStatus; hasKey: boolean; error?: string; message?: string }
   | { type: "RUNTIME_STATUS"; provider: RuntimeProvider; connected: boolean; modelId?: string; modelName?: string; localProvider?: LocalProvider; error?: string }
   | { type: "LOCAL_MODELS"; provider: LocalProvider; models: LocalModel[]; error?: string }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}}; script-src 'nonce-{{nonce}}';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; img-src {{cspSource}} data:;">
   <title>Spider</title>
   <link rel="stylesheet" href="{{styleUri}}">
 </head>
@@ -46,6 +46,7 @@
       <p id="auth-feedback" class="feedback" hidden></p>
     </section>
   </div>
-  <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+  <script nonce="{{nonce}}" src="{{scriptUri}}" data-spider-logo="{{logoUri}}"></script>
+  <meta name="spider-logo" content="{{logoUri}}">
 </body>
 </html>
