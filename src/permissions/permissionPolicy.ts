@@ -6,7 +6,7 @@ import {
   MODIFY_TOOL_NAMES,
   READ_TOOL_NAMES,
 } from "../runtime/tools/localToolDefinitions";
-import type { PermissionCategory, PermissionRequest } from "./permissionTypes";
+import type { PermissionCategory, PermissionRequest, RuntimeAutoApproveState } from "./permissionTypes";
 
 export interface PermissionPolicyOptions {
   readonly isWorkspaceTrusted: () => boolean;
@@ -22,6 +22,12 @@ export class PermissionPolicy {
   private readonly autoAllowExternal: boolean;
   private readonly destructiveConfirmations: ReadonlySet<string>;
   private readonly defaultTimeoutMs: number;
+  /** Runtime shield state (temporary, never persisted here). */
+  private runtimeAutoApprove: RuntimeAutoApproveState = {
+    enabled: false,
+    scope: "conversation",
+    updatedAt: 0,
+  };
 
   constructor(options: PermissionPolicyOptions) {
     this.isWorkspaceTrusted = options.isWorkspaceTrusted;
@@ -104,6 +110,46 @@ export class PermissionPolicy {
     }
 
     return false;
+  }
+
+  /** Current runtime shield state (composer shield toggle). */
+  getRuntimeAutoApprove(): RuntimeAutoApproveState {
+    return this.runtimeAutoApprove;
+  }
+
+  /**
+   * Sets the temporary runtime auto-approve state. This never touches the
+   * persistent policy options; enabling the shield is a runtime convenience,
+   * not a permission configuration change.
+   */
+  setRuntimeAutoApprove(enabled: boolean, scope: RuntimeAutoApproveState["scope"] = "conversation"): RuntimeAutoApproveState {
+    this.runtimeAutoApprove = {
+      enabled,
+      scope,
+      updatedAt: Date.now(),
+    };
+    return this.runtimeAutoApprove;
+  }
+
+  /**
+   * Runtime shield check: when enabled, non-destructive requests are approved
+   * without prompting. This is evaluated AFTER shouldAutoAllow and is
+   * deliberately weaker than every hard gate — an explicit deny, a destructive
+   * request, or an untrusted-workspace block must always win over the shield.
+   */
+  shouldRuntimeAutoApprove(request: PermissionRequest): boolean {
+    if (!this.runtimeAutoApprove.enabled) {
+      return false;
+    }
+    // Destructive actions are never covered by the shield, no matter what.
+    if (request.destructive || request.category === "DESTRUCTIVE") {
+      return false;
+    }
+    // An untrusted workspace is a security boundary, not a convenience.
+    if (this.isBlockedByTrust(request)) {
+      return false;
+    }
+    return true;
   }
 
   isBlockedByTrust(request: PermissionRequest): boolean {
