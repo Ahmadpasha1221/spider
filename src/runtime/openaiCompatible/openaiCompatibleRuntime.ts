@@ -19,6 +19,7 @@ import { nativeChatTools } from "../tools/toolRegistry";
 import { availableToolNames, type AgentMode } from "../tools/toolAvailability";
 import { modelSupportsNativeTools } from "../tools/textToolFallback";
 import { toOpenAiMessages } from "./openAiMessages";
+import { consumeOpenAiSseStream } from "./sseStream";
 type FetchLike = typeof fetch;
 
 function normalizeOpenAiUsage(usage: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | undefined): RuntimeUsage | undefined {
@@ -142,10 +143,11 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
         throw new RuntimeError("unsupported_capability", `Model ${modelId} does not support streaming.`, { details: { capability: "streaming", modelId } });
       }
     }
+    const streamDelta = request.onStreamDelta;
     await runInferenceAgentLoop(
       request,
       history,
-      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode),
+      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta),
       emit,
       { nativeTools, mode: request.mode },
     );
@@ -162,21 +164,31 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
     this.histories.clear();
   }
 
-  private async completeChat(modelId: string, messages: readonly ChatTurn[], signal?: AbortSignal, nativeTools = true, mode?: AgentMode) {
+  private async completeChat(modelId: string, messages: readonly ChatTurn[], signal?: AbortSignal, nativeTools = true, mode?: AgentMode, onDelta?: (text: string) => void) {
     const response = await this.request("/chat/completions", {
       method: "POST",
       signal,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(onDelta ? { Accept: "text/event-stream" } : {}),
+      },
       body: JSON.stringify({
         model: modelId,
         messages: toOpenAiMessages(messages),
-        stream: false,
+        // Real token streaming: the deltas feed request.onStreamDelta via the
+        // shared stream gate; the assembled completion still flows through the
+        // same agent-loop parsing as non-streamed responses.
+        stream: Boolean(onDelta),
         ...(nativeTools ? { tools: nativeChatTools(availableToolNames(mode)) } : {}),
       }),
     });
 
     if (!response.ok) {
       throw this.chatError(response.status, await safeBodyText(response));
+    }
+
+    if (onDelta) {
+      return consumeOpenAiSseStream(response, signal, onDelta);
     }
 
     const payload = (await response.json()) as {

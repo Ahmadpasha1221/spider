@@ -32,6 +32,8 @@ function copyGuiAssets() {
   fs.mkdirSync(outDir, { recursive: true });
   fs.copyFileSync(path.join("gui", "index.html"), path.join(outDir, "index.html"));
   fs.copyFileSync(path.join("gui", "styles", "main.css"), path.join(outDir, "main.css"));
+  // Spider mark for the empty-chat watermark (single asset, no duplication).
+  fs.copyFileSync(path.join("assets", "spider-icon.png"), path.join(outDir, "spider-icon.png"));
 }
 
 async function run() {
