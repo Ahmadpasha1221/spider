@@ -7,7 +7,9 @@ import { RuntimeManager } from "../runtime/runtimeManager";
 import type { FileChangeSummary, RuntimeEvent, RuntimeModel, RuntimeProviderConfig } from "../runtime/runtimeTypes";
 import { DEFAULT_OLLAMA_BASE_URL } from "../runtime/ollama/ollamaRuntime";
 import type { SecretStorage } from "../auth/secretStorage";
-import { OPENROUTER_API_KEY_SECRET_KEY } from "../shared/constants";
+import type { PermissionManager } from "../permissions/permissionManager";
+import { isPermissionRule, isPermissionRuleCategory } from "./permissionRules";
+import { EXTENSION_VERSION, OPENROUTER_API_KEY_SECRET_KEY } from "../shared/constants";
 import {
   AgentState,
   ExtensionMessage,
@@ -19,6 +21,9 @@ import {
 } from "./types";
 
 export class MessageRouter {
+  /** Optional late-bound permission manager (tests, non-extension contexts). */
+  private permissionManager?: PermissionManager;
+
   constructor(
     private readonly agentManager: AgentManager,
     private readonly defaultWorkspacePath = ".",
@@ -26,7 +31,14 @@ export class MessageRouter {
     private readonly cursorClient?: CursorClient,
     private readonly runtimeManager?: RuntimeManager,
     private readonly openRouterSecrets?: SecretStorage,
-  ) {}
+    dependencies?: { permissionManager?: PermissionManager },
+  ) {
+    this.permissionManager = dependencies?.permissionManager;
+  }
+
+  setPermissionManager(permissionManager: PermissionManager): void {
+    this.permissionManager = permissionManager;
+  }
 
   usesManagedRuntime(): boolean {
     const provider = this.runtimeManager?.provider;
@@ -138,6 +150,47 @@ export class MessageRouter {
         }
         return { success: true };
       }
+      case "SET_RUNTIME_AUTO_APPROVE": {
+        if (!this.permissionManager) {
+          return { type: "AUTO_APPROVE_STATE", enabled: false, scope: "conversation" };
+        }
+        // The manager is authoritative: it clamps scope and echoes the
+        // effective state back, which the GUI synchronizes to.
+        const scope = typed.scope === "runtime" ? "runtime" : "conversation";
+        const state = this.permissionManager.setRuntimeAutoApprove(typed.enabled, scope);
+        return { type: "AUTO_APPROVE_STATE", enabled: state.enabled, scope: state.scope };
+      }
+      case "GET_PERMISSION_RULES": {
+        if (!this.permissionManager) {
+          return { type: "PERMISSION_RULES", rules: emptyRules() };
+        }
+        return { type: "PERMISSION_RULES", rules: { ...this.permissionManager.listPermissionRules().rules } };
+      }
+      case "SET_PERMISSION_RULE": {
+        if (!this.permissionManager) {
+          return { type: "PERMISSION_RULES", rules: emptyRules() };
+        }
+        if (!isPermissionRuleCategory(typed.category) || !isPermissionRule(typed.rule)) {
+          throw new Error("Invalid SET_PERMISSION_RULE message");
+        }
+        const snapshot = this.permissionManager.setPermissionRule(typed.category, typed.rule);
+        return { type: "PERMISSION_RULES", rules: { ...snapshot.rules } };
+      }
+      case "GET_EXTENSION_INFO":
+        return {
+          type: "EXTENSION_INFO",
+          info: {
+            displayName: "Spider",
+            version: EXTENSION_VERSION,
+            publisher: "codevia",
+            license: "MIT",
+            repositoryUrl: "https://github.com/codevia/codevia-cursor",
+            activeProvider: this.runtimeManager?.provider,
+            ...(this.runtimeManager?.getProviderConfig()?.modelId
+              ? { activeModelId: this.runtimeManager.getProviderConfig()?.modelId }
+              : {}),
+          },
+        } as ExtensionMessage;
       case "CONNECT_CURSOR": {
         if (!this.connection) {
           return { success: true };
@@ -307,6 +360,15 @@ export class MessageRouter {
       default:
         return undefined;
     }
+  }
+
+  /**
+   * Maps permission-layer events (shield toggles) onto webview messages. The
+   * RuntimeManager event bus only carries RuntimeEvent values, so shield
+   * state changes travel through the same emitter via a typed wrapper.
+   */
+  toAutoApproveStateMessage(state: { enabled: boolean; scope: "conversation" | "runtime" }): ExtensionMessage {
+    return { type: "AUTO_APPROVE_STATE", enabled: state.enabled, scope: state.scope };
   }
 
   runtimeStatus(error?: string): ExtensionMessage {
@@ -603,6 +665,23 @@ export class MessageRouter {
           throw new Error(`Invalid ${type} message`);
         }
         return message as WebviewMessage;
+      case "SET_RUNTIME_AUTO_APPROVE":
+        if (typeof typed.enabled !== "boolean") {
+          throw new Error("Invalid SET_RUNTIME_AUTO_APPROVE message");
+        }
+        if (typed.scope !== undefined && typed.scope !== "conversation" && typed.scope !== "runtime") {
+          throw new Error("Invalid SET_RUNTIME_AUTO_APPROVE message");
+        }
+        return message as WebviewMessage;
+      case "GET_PERMISSION_RULES":
+        return message as WebviewMessage;
+      case "SET_PERMISSION_RULE":
+        if (!isPermissionRuleCategory(typed.category) || !isPermissionRule(typed.rule)) {
+          throw new Error("Invalid SET_PERMISSION_RULE message");
+        }
+        return message as WebviewMessage;
+      case "GET_EXTENSION_INFO":
+        return message as WebviewMessage;
       case "CONNECT_CURSOR":
         if (typed.apiKey !== undefined && typeof typed.apiKey !== "string") {
           throw new Error("Invalid CONNECT_CURSOR message");
@@ -649,6 +728,16 @@ export class MessageRouter {
       }
     }
   }
+}
+
+function emptyRules() {
+  return {
+    READ: "ask",
+    MODIFY: "ask",
+    EXECUTE: "ask",
+    EXTERNAL: "ask",
+    DESTRUCTIVE: "ask",
+  } as Record<import("./types").PermissionRuleCategory, import("./types").PermissionRule>;
 }
 
 function localConfig(

@@ -37,8 +37,6 @@
     "ui"
   ],
   "activationEvents": [
-    "onCommand:codeviaCursor.openAgent",
-    "onCommand:codeviaCursor.openSettings",
     "onAuthentication:codeviaCursor"
   ],
   "authentication": {

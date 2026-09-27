@@ -254,6 +254,9 @@ export class RuntimeManager implements vscode.Disposable {
       throw new RuntimeError("invalid_configuration", "No runtime provider is configured.");
     }
 
+    // A conversation-scoped shield does not survive a new conversation.
+    this.resetConversationScopedAutoApprove();
+
     const now = new Date();
     const modelId = this.activeConfig && "modelId" in this.activeConfig ? this.activeConfig.modelId : undefined;
     const session: CodeviaSession = {
@@ -670,17 +673,30 @@ export class RuntimeManager implements vscode.Disposable {
       path,
     );
 
+    // Hard gate 1: workspace trust. Not even the runtime shield may bypass it.
     if (this.options.permissionManager.isBlockedByTrust(request)) {
       return { allowed: false, error: "The workspace trust policy blocked this tool." };
     }
 
-    if (!this.options.permissionManager.shouldAutoAllow(request)) {
-      const pending = this.options.permissionManager.requestPermission(request, signal);
-      this.publishEvent({ type: "permission_request", sessionId: session.sessionId, request, timestamp: Date.now() });
-      const resolution = await pending;
-      if (resolution.status !== "allowed") {
-        return { allowed: false, error: `Permission ${resolution.status}.` };
-      }
+    // Hard gate 2: policy auto-allow (persistent rules).
+    if (this.options.permissionManager.shouldAutoAllow(request)) {
+      return { allowed: true };
+    }
+
+    // Convenience layer: runtime shield (composer toggle). Evaluated after
+    // every hard gate; destructive requests and untrusted workspaces are
+    // excluded inside shouldRuntimeAutoApprove, and an explicit user deny is
+    // a resolution of a prompt that only exists when the shield is off, so a
+    // deny can never be overridden here.
+    if (this.options.permissionManager.shouldRuntimeAutoApprove(request)) {
+      return { allowed: true };
+    }
+
+    const pending = this.options.permissionManager.requestPermission(request, signal);
+    this.publishEvent({ type: "permission_request", sessionId: session.sessionId, request, timestamp: Date.now() });
+    const resolution = await pending;
+    if (resolution.status !== "allowed") {
+      return { allowed: false, error: `Permission ${resolution.status}.` };
     }
 
     return { allowed: true };
@@ -724,6 +740,14 @@ export class RuntimeManager implements vscode.Disposable {
 
   private normalizeRuntimeStatus(status: RuntimeSessionStatus): RuntimeSessionStatus {
     return status;
+  }
+
+  /** Conversation-scoped shields are cleared when a new conversation starts. */
+  private resetConversationScopedAutoApprove(): void {
+    const state = this.options.permissionManager.getRuntimeAutoApprove();
+    if (state.enabled && state.scope === "conversation") {
+      this.options.permissionManager.setRuntimeAutoApprove(false, state.scope);
+    }
   }
 
   private getCurrentRuntime(): AgentRuntime {

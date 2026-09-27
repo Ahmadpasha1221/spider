@@ -1,5 +1,8 @@
 import type { FileChangeSummary } from "../runtime/runtimeTypes";
 import type { AgentSession } from "../agent/agentSession";
+import type { PermissionRule, PermissionRuleCategory } from "./permissionRules";
+
+export type { PermissionRule, PermissionRuleCategory } from "./permissionRules";
 
 export type GuiRuntimeProvider = "cursor" | "local" | "mock" | "openrouter";
 export type LocalProvider = "ollama" | "openai-compatible";
@@ -30,7 +33,12 @@ export type WebviewMessage =
   | { type: "APPROVE_PERMISSION"; requestId: string }
   | { type: "DENY_PERMISSION"; requestId: string }
   | { type: "TRY_AGAIN"; sessionId: string }
-  | { type: "LIST_SESSIONS" };
+  | { type: "LIST_SESSIONS" }
+  /** Composer shield: enable/disable the temporary runtime auto-approve. */
+  | { type: "SET_RUNTIME_AUTO_APPROVE"; enabled: boolean; scope?: "conversation" | "runtime" }
+  | { type: "GET_PERMISSION_RULES" }
+  | { type: "SET_PERMISSION_RULE"; category: PermissionRuleCategory; rule: PermissionRule }
+  | { type: "GET_EXTENSION_INFO" };
 
 export type AuthStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -79,6 +87,22 @@ export interface FileChangeView {
   isNewFile: boolean;
 }
 
+/** Categories exposed in Settings → Auto Approve (real permission categories). */
+export interface PermissionRulesView {
+  rules: Record<PermissionRuleCategory, PermissionRule>;
+}
+
+/** Static extension metadata for Settings → About Spider. */
+export interface ExtensionInfoView {
+  displayName: string;
+  version: string;
+  publisher: string;
+  license: string;
+  repositoryUrl?: string;
+  activeProvider?: string;
+  activeModelId?: string;
+}
+
 export type ExtensionMessage =
   | { type: "AGENT_STATE"; state: AgentState }
   | { type: "AGENT_MESSAGE"; message: string }
@@ -93,6 +117,9 @@ export type ExtensionMessage =
   | { type: "AGENT_ERROR"; error: string }
   | { type: "PERMISSION_REQUEST"; requestId: string; message: string; command?: string; category?: string; destructive?: boolean }
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
+  | { type: "AUTO_APPROVE_STATE"; enabled: boolean; scope: "conversation" | "runtime" }
+  | { type: "PERMISSION_RULES"; rules: Record<PermissionRuleCategory, PermissionRule> }
+  | { type: "EXTENSION_INFO"; info: ExtensionInfoView }
   | AuthStatusMessage
   | {
       type: "RUNTIME_STATUS";

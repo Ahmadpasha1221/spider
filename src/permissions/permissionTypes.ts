@@ -40,10 +40,25 @@ export interface PermissionResolution {
 export type PermissionEvent =
   | { type: "permission_requested"; request: PermissionRequest }
   | { type: "permission_resolved"; resolution: PermissionResolution }
-  | { type: "permission_error"; requestId?: string; error: string };
+  | { type: "permission_error"; requestId?: string; error: string }
+  | { type: "runtime_auto_approve_changed"; state: RuntimeAutoApproveState };
 
 export interface PendingPermissionRequest {
   readonly request: PermissionRequest;
   readonly resolve: (resolution: PermissionResolution) => void;
   readonly timeout?: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * Runtime auto-approve scope for the composer shield toggle.
+ * "conversation" scopes the shield to the active conversation (cleared when a
+ * new conversation is created); "runtime" keeps it until toggled off again.
+ */
+export type RuntimeAutoApproveScope = "conversation" | "runtime";
+
+export interface RuntimeAutoApproveState {
+  readonly enabled: boolean;
+  readonly scope: RuntimeAutoApproveScope;
+  /** Epoch millis of the last state change (diagnostics/audit only). */
+  readonly updatedAt: number;
 }

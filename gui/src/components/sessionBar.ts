@@ -45,6 +45,8 @@ export function createSessionBar(
       }
       lastKey = key;
 
+      // No "Session" wording in user-facing labels — this is a conversation
+      // switcher; internal ids/types keep the session naming.
       label.textContent = sessions.length ? "History" : "New conversation";
       select.disabled = disabled || sessions.length === 0;
       create.disabled = disabled;

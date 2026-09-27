@@ -1,0 +1,36 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Compile Extension",
+      "type": "shell",
+      "command": "node esbuild.js",
+      "problemMatcher": ["$esbuild-strict"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Compile Tests",
+      "type": "shell",
+      "command": "tsc -p tsconfig.test.json",
+      "problemMatcher": ["$tsc"],
+      "group": "test"
+    },
+    {
+      "label": "Typecheck",
+      "type": "shell",
+      "command": "tsc --noEmit",
+      "problemMatcher": ["$tsc"],
+      "group": "build"
+    },
+    {
+      "label": "Lint",
+      "type": "shell",
+      "command": "eslint src test --max-warnings 0",
+      "problemMatcher": ["$eslint-stylish"],
+      "group": "build"
+    }
+  ]
+}

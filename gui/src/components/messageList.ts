@@ -1,5 +1,6 @@
 import type { FileChangeView } from "../protocol";
 import type { ChatLine } from "../state";
+import { createStreamCoalescer } from "../streamCoalescer";
 
 type MessageListHandlers = {
   onAllowPermission?: (requestId: string) => void;
@@ -7,6 +8,7 @@ type MessageListHandlers = {
   onViewDiff?: (changeId: string) => void;
   onAcceptChange?: (changeId: string) => void;
   onRejectChange?: (changeId: string) => void;
+  onOpenArtifact?: (path: string) => void;
 };
 
 /**
@@ -14,8 +16,8 @@ type MessageListHandlers = {
  * on every host event made the Allow/Deny permission buttons unclickable (the
  * element was replaced between mousedown and mouseup) and reset scroll.
  *
- * Streaming text and tool/command lifecycle updates mutate ONE element in
- * place instead of rebuilding the list, so no interactive element is ever
+ * Streaming text, tool/command lifecycle, and artifact cards mutate ONE element
+ * in place instead of rebuilding the list, so no interactive element is ever
  * destroyed while the pointer is down. Scroll is pinned to the bottom only
  * while the user is already at the bottom (sticky scroll), and the scroll
  * write is batched to animation frames.
@@ -30,16 +32,29 @@ export interface MessageListHandle {
   replaceAll(lines: readonly ChatLine[], handlers?: MessageListHandlers): void;
   /** Remove every line (used when a new conversation is activated). */
   clear(): void;
-  /** Create (or replace) the single streaming assistant line. */
+  /** Create (or replace) the single streaming assistant line and append a delta chunk. */
   upsertStreamingLine(text: string, handlers?: MessageListHandlers): void;
   /** Finalize the streaming line into a normal agent line. */
   finishStreamingLine(finalText: string): void;
+  /**
+   * Closes the current streaming turn (flush + reset the accumulator) without
+   * removing the painted text. Called at turn boundaries (tool calls, thinking
+   * blocks) so the next assistant segment starts a fresh line instead of
+   * concatenating onto the previous one.
+   */
+  endStreamingTurn(): void;
+  /** Create or update the single agent-status (Thinking) block. */
+  upsertThinkingBlock(text: string, state: "active" | "settled"): void;
+  /** Settle the Thinking block when the next activity or response arrives. */
+  settleThinkingBlock(): void;
   /** Create or update one tool execution box, matched by toolCallId. */
   upsertToolLine(tool: NonNullable<ChatLine["tool"]>, handlers?: MessageListHandlers): void;
   /** Create or update one command execution box, matched by toolCallId. */
   upsertCommandLine(command: NonNullable<ChatLine["command"]>, handlers?: MessageListHandlers): void;
   /** Flip an existing command box to its terminal state (no new element). */
   completeCommandLine(toolCallId: string | undefined, exitCode: number | null): void;
+  /** Create or update one artifact card, matched by changeId. */
+  upsertArtifact(change: FileChangeView, reverted: boolean, handlers?: MessageListHandlers): void;
   /** Resolve a pending permission prompt in place, without rebuilding the list. */
   resolvePermission(requestId: string, decision: "ALLOW" | "DENY"): void;
 }
@@ -48,11 +63,25 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
   let currentHandlers: MessageListHandlers = initialHandlers ?? {};
 
   const itemByToolCallId = new Map<string, HTMLElement>();
+  const artifactByChangeId = new Map<string, HTMLElement>();
   let streamingLine: HTMLElement | undefined;
   let streamingBody: Text | undefined;
-  let streamScheduled = false;
+  let thinkingBlock: HTMLElement | undefined;
+  let thinkingBody: HTMLElement | undefined;
   let scrollScheduled = false;
-  let lastStreamText = "";
+  /**
+   * Accumulated text of the CURRENT streaming segment. Chunks append here;
+   * the text node is repainted on the coalescer cadence (~110ms), not per
+   * token, so generation feels continuous without per-token DOM writes.
+   */
+  let streamText = "";
+  let coalescer = createStreamCoalescer(paintStreamText);
+
+  function resetStreamState(): void {
+    coalescer.close();
+    coalescer = createStreamCoalescer(paintStreamText);
+    streamText = "";
+  }
 
   function isPinnedToBottom(): boolean {
     return root.scrollHeight - root.scrollTop - root.clientHeight < 48;
@@ -103,7 +132,75 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
     return { article, body };
   }
 
+  function appendArtifactLine(change: FileChangeView): void {
+    const card = document.createElement("article");
+    card.className = "artifact-card";
+    card.dataset.status = change.status === "REVERTED" ? "reverted" : "applied";
+    card.setAttribute("role", "group");
+
+    const head = document.createElement("div");
+    head.className = "artifact-head";
+    const icon = document.createElement("span");
+    icon.className = "artifact-icon";
+    icon.textContent = "◇";
+    const kind = document.createElement("span");
+    kind.className = "artifact-kind";
+    kind.textContent = change.status === "REVERTED" ? "Artifact · Reverted" : change.isNewFile ? "Artifact · Created" : "Artifact · Updated";
+    head.append(icon, kind);
+
+    const path = document.createElement("div");
+    path.className = "artifact-path";
+    path.textContent = change.path;
+    path.title = change.path;
+
+    const stats = document.createElement("div");
+    stats.className = "artifact-stats";
+    const add = document.createElement("span");
+    add.className = "diff-add";
+    add.textContent = `+${change.additions}`;
+    const del = document.createElement("span");
+    del.className = "diff-del";
+    del.textContent = `−${change.deletions}`;
+    stats.append(add, del);
+
+    const actions = document.createElement("div");
+    actions.className = "artifact-actions";
+    const open = document.createElement("button");
+    open.className = "btn btn-ghost btn-small";
+    open.type = "button";
+    open.textContent = "Open";
+    open.addEventListener("click", () => currentHandlers.onOpenArtifact?.(change.path));
+    const view = document.createElement("button");
+    view.className = "btn btn-ghost btn-small";
+    view.type = "button";
+    view.textContent = "View changes";
+    view.addEventListener("click", () => currentHandlers.onViewDiff?.(change.changeId));
+    actions.append(open, view);
+    if (change.status === "APPLIED") {
+      const keep = document.createElement("button");
+      keep.className = "btn btn-small";
+      keep.type = "button";
+      keep.textContent = "Keep";
+      keep.addEventListener("click", () => currentHandlers.onAcceptChange?.(change.changeId));
+      const reject = document.createElement("button");
+      reject.className = "btn btn-danger btn-small";
+      reject.type = "button";
+      reject.textContent = "Revert";
+      reject.addEventListener("click", () => currentHandlers.onRejectChange?.(change.changeId));
+      actions.append(keep, reject);
+    }
+
+    card.append(head, path, stats, actions);
+    root.appendChild(card);
+    artifactByChangeId.set(change.changeId, card);
+  }
+
   function appendLine(message: ChatLine): void {
+    // Artifacts restored from a transcript render as artifact cards too.
+    if (message.artifact) {
+      appendArtifactLine(message.artifact);
+      return;
+    }
     const { article } = buildBaseLine(message);
     appendInteractive(article, message);
     root.appendChild(article);
@@ -119,22 +216,72 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
   }
 
   function syncEmptyState(): void {
-    const hasLines = root.querySelector(".message") !== null;
+    const hasLines = root.querySelector(".message, .artifact-card, .exec-box") !== null;
     const empty = root.querySelector<HTMLElement>(".empty-chat");
     if (!hasLines && !empty) {
       const placeholder = document.createElement("div");
       placeholder.className = "empty-chat";
-      placeholder.innerHTML = `<strong>How can I help?</strong><span>Ask Spider to explain, debug, refactor, or work on your code.</span>`;
+      const mark = document.createElement("img");
+      mark.className = "empty-chat-watermark";
+      // Spider mark (assets/spider-icon.png) served through the webview URI
+      // injected into the HTML; decorative, click-through, theme-tinted in CSS.
+      const logoMeta = document.querySelector<HTMLMetaElement>('meta[name="spider-logo"]');
+      if (logoMeta?.content && !logoMeta.content.includes("{{logoUri}}")) {
+        mark.src = logoMeta.content;
+      }
+      mark.alt = "";
+      mark.setAttribute("aria-hidden", "true");
+      mark.draggable = false;
+      const title = document.createElement("strong");
+      title.textContent = "How can I help?";
+      const hint = document.createElement("span");
+      hint.textContent = "Ask Spider to explain, debug, refactor, or work on your code.";
+      placeholder.append(mark, title, hint);
       root.appendChild(placeholder);
     } else if (hasLines && empty) {
       empty.remove();
     }
   }
 
-  /** Updates the streaming line's text node only — no DOM rebuild, no reflow of siblings. */
-  function paintStreamingLine(): void {
-    if (streamingBody && lastStreamText !== streamingBody.textContent) {
-      streamingBody.textContent = lastStreamText;
+  /**
+   * Creates the streaming line on demand. One article + one text node; later
+   * updates mutate the text node only, so nothing interactive is ever rebuilt.
+   */
+  function ensureStreamingLine(): void {
+    if (streamingLine && streamingLine.isConnected) {
+      return;
+    }
+    const article = document.createElement("article");
+    article.className = "message message-agent streaming-line";
+    const meta = document.createElement("span");
+    meta.className = "message-meta";
+    meta.textContent = "Spider";
+    streamingBody = document.createTextNode("");
+    const body = document.createElement("div");
+    body.className = "message-body";
+    body.appendChild(streamingBody);
+    article.append(meta, body);
+    root.appendChild(article);
+    streamingLine = article;
+    streamText = "";
+    const empty = root.querySelector<HTMLElement>(".empty-chat");
+    if (empty) {
+      empty.remove();
+    }
+  }
+
+  /**
+   * Coalescer tick: repaints the streaming line's text node from the
+   * accumulated buffer. One text-node write per ~110ms — no DOM rebuild, no
+   * sibling reflow — then a sticky-bottom scroll check on the same frame.
+   */
+  function paintStreamText(text: string): void {
+    if (!streamingLine || !streamingLine.isConnected) {
+      ensureStreamingLine();
+    }
+    if (streamingBody && text.length > 0) {
+      streamingBody.textContent += text;
+      scheduleScroll();
     }
   }
 
@@ -157,8 +304,12 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       }
       root.replaceChildren();
       itemByToolCallId.clear();
+      artifactByChangeId.clear();
       streamingLine = undefined;
       streamingBody = undefined;
+      thinkingBlock = undefined;
+      thinkingBody = undefined;
+      resetStreamState();
       const pinned = isPinnedToBottom();
       for (const message of lines) {
         appendLine(message);
@@ -170,9 +321,12 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
     clear() {
       root.replaceChildren();
       itemByToolCallId.clear();
+      artifactByChangeId.clear();
       streamingLine = undefined;
       streamingBody = undefined;
-      lastStreamText = "";
+      thinkingBlock = undefined;
+      thinkingBody = undefined;
+      resetStreamState();
       syncEmptyState();
       scheduleScroll(true);
     },
@@ -181,40 +335,36 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       if (handlers) {
         currentHandlers = handlers;
       }
-      if (!streamingLine || !streamingLine.isConnected) {
-        const article = document.createElement("article");
-        article.className = "message message-agent streaming-line";
-        const meta = document.createElement("span");
-        meta.className = "message-meta";
-        meta.textContent = "Spider";
-        streamingBody = document.createTextNode("");
-        const body = document.createElement("div");
-        body.className = "message-body";
-        body.appendChild(streamingBody);
-        article.append(meta, body);
-        root.appendChild(article);
-        streamingLine = article;
-        lastStreamText = "";
-        const empty = root.querySelector<HTMLElement>(".empty-chat");
-        if (empty) {
-          empty.remove();
-        }
+      // Assistant output starting settles the Thinking block in place — the
+      // status block does not pop away; it transitions into the response.
+      this.settleThinkingBlock();
+      ensureStreamingLine();
+      // Append the delta to the accumulator; the coalescer repaints on its
+      // ~110ms cadence (first chunk paints immediately).
+      streamText += text;
+      coalescer.push(text);
+    },
+
+    endStreamingTurn() {
+      // Flush pending text into the current line, then start a fresh segment:
+      // the painted text stays, the accumulator resets for the next part of
+      // the conversation (e.g. after a tool block).
+      coalescer.close();
+      coalescer = createStreamCoalescer(paintStreamText);
+      if (streamingLine && streamingLine.isConnected) {
+        streamingLine.classList.remove("streaming-line");
       }
-      lastStreamText = text;
-      if (!streamScheduled) {
-        streamScheduled = true;
-        requestAnimationFrame(() => {
-          streamScheduled = false;
-          paintStreamingLine();
-          scheduleScroll();
-        });
-      }
+      streamingLine = undefined;
+      streamingBody = undefined;
+      streamText = "";
     },
 
     finishStreamingLine(finalText) {
+      // Release any text still held by the coalescer before deciding what to
+      // keep, so the comparison below sees the fully painted state.
+      coalescer.close();
       if (streamingLine && streamingLine.isConnected) {
-        paintStreamingLine();
-        const streamedText = lastStreamText;
+        const streamedText = streamText;
         // Nothing visible was streamed and nothing final arrived: drop the
         // empty line instead of leaving an empty agent bubble.
         if (streamedText.length === 0 && finalText.length === 0) {
@@ -224,19 +374,56 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
           if (finalText.length > 0) {
             const body = streamingLine.querySelector(".message-body");
             if (body) {
+              // The finalized model message replaces the accumulated stream
+              // text exactly once — same source, no duplication possible.
               body.textContent = finalText;
             }
           }
         }
-        streamingLine = undefined;
-        streamingBody = undefined;
-        lastStreamText = "";
-        return;
-      }
-      if (finalText.length > 0) {
+      } else if (finalText.length > 0) {
         const { article } = buildBaseLine({ role: "agent", text: finalText });
         root.appendChild(article);
         scheduleScroll();
+      }
+      streamingLine = undefined;
+      streamingBody = undefined;
+      resetStreamState();
+    },
+
+    upsertThinkingBlock(text, state) {
+      // Thinking precedes assistant output: close any open streaming segment.
+      this.endStreamingTurn();
+      const empty = root.querySelector<HTMLElement>(".empty-chat");
+      if (empty) {
+        empty.remove();
+      }
+      if (!thinkingBlock || !thinkingBlock.isConnected) {
+        thinkingBlock = document.createElement("article");
+        thinkingBlock.className = "message message-thinking-block";
+        thinkingBlock.setAttribute("aria-live", "polite");
+        const head = document.createElement("div");
+        head.className = "thinking-head";
+        const icon = document.createElement("span");
+        icon.className = "thinking-icon";
+        icon.textContent = "✦";
+        const label = document.createElement("span");
+        label.textContent = "Thinking";
+        head.append(icon, label);
+        thinkingBody = document.createElement("div");
+        thinkingBody.className = "thinking-body";
+        thinkingBlock.append(head, thinkingBody);
+        root.appendChild(thinkingBlock);
+      }
+      thinkingBlock.dataset.state = state;
+      if (thinkingBody && thinkingBody.textContent !== text) {
+        thinkingBody.textContent = text;
+      }
+      scheduleScroll();
+    },
+
+    settleThinkingBlock() {
+      if (thinkingBlock && thinkingBlock.isConnected && thinkingBlock.dataset.state === "active") {
+        thinkingBlock.dataset.state = "settled";
       }
     },
 
@@ -244,27 +431,32 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       if (handlers) {
         currentHandlers = handlers;
       }
+      this.settleThinkingBlock();
+      // A tool call is its own activity block: close any open streaming
+      // segment so assistant text after the tool starts a new line.
+      this.endStreamingTurn();
       let article = itemByToolCallId.get(tool.toolCallId);
       const pinned = isPinnedToBottom();
       if (!article || !article.isConnected) {
         article = document.createElement("article");
         article.className = "message message-tool exec-box";
-        const meta = document.createElement("span");
-        meta.className = "message-meta";
-        meta.textContent = "Tool";
+        article.setAttribute("role", "status");
         const card = document.createElement("div");
         card.className = "exec-card";
         const head = document.createElement("div");
         head.className = "exec-head";
+        const icon = document.createElement("span");
+        icon.className = "exec-icon";
+        icon.textContent = "◈";
         const name = document.createElement("span");
         name.className = "exec-name";
         const status = document.createElement("span");
         status.className = "exec-status";
-        head.append(name, status);
+        head.append(icon, name, status);
         const detail = document.createElement("div");
         detail.className = "exec-detail";
         card.append(head, detail);
-        article.append(meta, card);
+        article.append(card);
         root.appendChild(article);
         itemByToolCallId.set(tool.toolCallId, article);
       }
@@ -275,7 +467,7 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
         name.textContent = tool.toolName;
       }
       if (status) {
-        status.textContent = tool.status === "running" ? "Running" : tool.status === "failed" ? "Failed" : "Completed";
+        status.textContent = tool.status === "running" ? "Running" : tool.status === "failed" ? "Failed" : "✓ Completed";
         status.className = `exec-status is-${tool.status}`;
       }
       if (detail) {
@@ -291,28 +483,32 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       if (handlers) {
         currentHandlers = handlers;
       }
+      this.settleThinkingBlock();
+      // Same turn-boundary rule as tools: commands get their own block.
+      this.endStreamingTurn();
       const key = command.toolCallId ?? `cmd:${command.command}`;
       let article = itemByToolCallId.get(key);
       const pinned = isPinnedToBottom();
       if (!article || !article.isConnected) {
         article = document.createElement("article");
         article.className = "message message-tool exec-box";
-        const meta = document.createElement("span");
-        meta.className = "message-meta";
-        meta.textContent = "Command";
+        article.setAttribute("role", "status");
         const card = document.createElement("div");
         card.className = "exec-card";
         const head = document.createElement("div");
         head.className = "exec-head";
+        const icon = document.createElement("span");
+        icon.className = "exec-icon";
+        icon.textContent = "▣";
         const name = document.createElement("span");
         name.className = "exec-name";
         const status = document.createElement("span");
         status.className = "exec-status";
-        head.append(name, status);
+        head.append(icon, name, status);
         const output = document.createElement("pre");
         output.className = "exec-output";
         card.append(head, output);
-        article.append(meta, card);
+        article.append(card);
         root.appendChild(article);
         itemByToolCallId.set(key, article);
       }
@@ -324,7 +520,7 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       }
       const failed = command.exitCode !== undefined && command.exitCode !== null && command.exitCode !== 0;
       if (status) {
-        status.textContent = command.running ? "Running" : failed ? "Failed" : "Completed";
+        status.textContent = command.running ? "Running" : failed ? "Failed" : "✓ Completed";
         status.className = `exec-status is-${command.running ? "running" : failed ? "failed" : "completed"}`;
       }
       if (output) {
@@ -346,10 +542,93 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       const status = article.querySelector<HTMLElement>(".exec-status");
       const failed = exitCode !== null && exitCode !== 0;
       if (status) {
-        status.textContent = failed ? "Failed" : "Completed";
+        status.textContent = failed ? "Failed" : "✓ Completed";
         status.className = `exec-status is-${failed ? "failed" : "completed"}`;
       }
       article.dataset.status = failed ? "failed" : "completed";
+    },
+
+    upsertArtifact(change, reverted, handlers) {
+      if (handlers) {
+        currentHandlers = handlers;
+      }
+      let card = artifactByChangeId.get(change.changeId);
+      const pinned = isPinnedToBottom();
+      if (!card || !card.isConnected) {
+        card = document.createElement("article");
+        card.className = "artifact-card";
+        card.setAttribute("role", "group");
+        const head = document.createElement("div");
+        head.className = "artifact-head";
+        const icon = document.createElement("span");
+        icon.className = "artifact-icon";
+        icon.textContent = "◇";
+        const kind = document.createElement("span");
+        kind.className = "artifact-kind";
+        head.append(icon, kind);
+        const path = document.createElement("div");
+        path.className = "artifact-path";
+        const stats = document.createElement("div");
+        stats.className = "artifact-stats";
+        const actions = document.createElement("div");
+        actions.className = "artifact-actions";
+        card.append(head, path, stats, actions);
+        root.appendChild(card);
+        artifactByChangeId.set(change.changeId, card);
+      }
+      const kind = card.querySelector<HTMLElement>(".artifact-kind");
+      const path = card.querySelector<HTMLElement>(".artifact-path");
+      const stats = card.querySelector<HTMLElement>(".artifact-stats");
+      const actions = card.querySelector<HTMLElement>(".artifact-actions");
+
+      if (kind) {
+        kind.textContent = reverted || change.status === "REVERTED" ? "Artifact · Reverted" : change.isNewFile ? "Artifact · Created" : "Artifact · Updated";
+      }
+      if (path) {
+        path.textContent = change.path;
+        path.title = change.path;
+      }
+      if (stats) {
+        stats.replaceChildren();
+        const add = document.createElement("span");
+        add.className = "diff-add";
+        add.textContent = `+${change.additions}`;
+        const del = document.createElement("span");
+        del.className = "diff-del";
+        del.textContent = `−${change.deletions}`;
+        stats.append(add, del);
+      }
+      if (actions) {
+        actions.replaceChildren();
+        const open = document.createElement("button");
+        open.className = "btn btn-ghost btn-small";
+        open.type = "button";
+        open.textContent = "Open";
+        open.addEventListener("click", () => currentHandlers.onOpenArtifact?.(change.path));
+        const view = document.createElement("button");
+        view.className = "btn btn-ghost btn-small";
+        view.type = "button";
+        view.textContent = "View changes";
+        view.addEventListener("click", () => currentHandlers.onViewDiff?.(change.changeId));
+        if (!reverted && change.status === "APPLIED") {
+          const keep = document.createElement("button");
+          keep.className = "btn btn-small";
+          keep.type = "button";
+          keep.textContent = "Keep";
+          keep.addEventListener("click", () => currentHandlers.onAcceptChange?.(change.changeId));
+          const reject = document.createElement("button");
+          reject.className = "btn btn-danger btn-small";
+          reject.type = "button";
+          reject.textContent = "Revert";
+          reject.addEventListener("click", () => currentHandlers.onRejectChange?.(change.changeId));
+          actions.append(open, view, keep, reject);
+        } else {
+          actions.append(open, view);
+        }
+      }
+      card.dataset.status = reverted || change.status === "REVERTED" ? "reverted" : "applied";
+      syncEmptyState();
+      scheduleScroll(pinned);
     },
 
     resolvePermission(requestId, decision) {

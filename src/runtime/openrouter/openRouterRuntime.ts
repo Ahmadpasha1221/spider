@@ -23,6 +23,7 @@ import {
   type OpenAICompatibleRuntimeOptions,
 } from "../openaiCompatible/openaiCompatibleRuntime";
 import { toOpenAiMessages } from "../openaiCompatible/openAiMessages";
+import { consumeOpenAiSseStream } from "../openaiCompatible/sseStream";
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -180,10 +181,11 @@ export class OpenRouterRuntime implements AgentRuntime {
         { details: { capability: "streaming", modelId } },
       );
     }
+    const streamDelta = request.onStreamDelta;
     await runInferenceAgentLoop(
       request,
       this.historyFor(request.sessionId),
-      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode),
+      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta),
       emit,
       { nativeTools, mode: request.mode },
     );
@@ -222,21 +224,31 @@ export class OpenRouterRuntime implements AgentRuntime {
     signal?: AbortSignal,
     nativeTools = true,
     mode?: AgentMode,
+    onDelta?: (text: string) => void,
   ): Promise<ChatCompletion> {
     const response = await this.request("/chat/completions", {
       method: "POST",
       signal,
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(onDelta ? { Accept: "text/event-stream" } : {}),
+      },
       body: JSON.stringify({
         model: modelId,
         messages: toOpenAiMessages(messages),
-        stream: false,
+        // Token streaming for OpenRouter too: same shared SSE consumer and
+        // stream gate as the generic OpenAI-compatible base.
+        stream: Boolean(onDelta),
         ...(nativeTools ? { tools: nativeChatTools(availableToolNames(mode)) } : {}),
       }),
     });
 
     if (!response.ok) {
       throw chatErrorFor(response.status, await safeBodyText(response));
+    }
+
+    if (onDelta) {
+      return consumeOpenAiSseStream(response, signal, onDelta);
     }
 
     const payload = (await response.json()) as {

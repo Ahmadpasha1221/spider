@@ -9,7 +9,3 @@ Thumbs.db
 .env.*
 !.env.example
 coverage/
-.vscode/launch.json
-.vscode/tasks.json
-.vscode/settings.json
-.vscode/extensions.json

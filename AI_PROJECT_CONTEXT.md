@@ -21,7 +21,10 @@
 - **Current development stage:** working end-to-end on Ollama, OpenRouter and
   Mock. Recent work: OpenAI-compatible tool-call-id lifecycle fix, provider
   config persistence, dedicated History page, "Spider" rebrand, streaming UI
-  rework (in-place updates, rAF batching), optimistic new-conversation reset.
+  rework (in-place updates, rAF batching), optimistic new-conversation reset,
+  **real SSE token streaming (OpenAI-compatible + OpenRouter), runtime
+  auto-approve shield, composer model selector, artifact cards, redesigned
+  Settings IA (sidebar sections), Spider watermark empty state** (2026-09-27).
 - **Identity note:** internal identifiers (`codeviaCursor`, `CodeviaSession`,
   storage keys `codeviaCursor.*`, package name `codevia-cursor`) intentionally
   keep the old name. Only user-facing strings say "Spider". Do NOT rename
@@ -166,7 +169,15 @@ shape; `ChatCompletion` is what `completeChat` returns.
 - `prepareHistory` drops a trailing bare tool-call turn (retry) and
   `ensureSystemPrompt` refreshes the system prompt each run.
 - Streaming: `onStreamDelta` hook; Ollama gates streamed text through
-  `createStreamGate` so partial tool JSON never reaches the UI.
+  `createStreamGate` so partial tool JSON never reaches the UI. The
+  OpenAI-compatible base and OpenRouter now stream for real: when a delta
+  hook is present they send `stream: true` and consume SSE via
+  `consumeOpenAiSseStream` (`src/runtime/openaiCompatible/sseStream.ts`),
+  which merges tool-call fragments by index, preserves provider ids, and
+  releases only gate-safe text. `stream: false` remains for non-streaming
+  calls (capability `streaming` is still honored).
+- The stream gate lives in `src/runtime/ollama/streamGate.ts` (shared by
+  Ollama NDJSON and the SSE consumer; re-exported from `ollamaRuntime.ts`).
 
 ### Why it works this way
 One loop = one place for lifecycle, safety (classification gates, thinking
@@ -219,6 +230,25 @@ maps to tool sets. Not an intent router; never inspects user text.
 `src/permissions/permissionManager.ts` + `permissionPolicy.ts`: trust checks,
 auto-allow rules, destructive confirmations, request/resolve lifecycle with
 timeout. RuntimeManager bridges events to the GUI (Allow/Deny buttons).
+
+**Authorization pipeline (single definition, `PermissionManager.authorize`):**
+workspace trust gate → explicit deny (category rule) → policy auto-allow →
+runtime shield → prompt. Every caller must go through this order.
+
+**Runtime auto-approve (the composer shield):** a temporary toggle stored in
+`PermissionPolicy` (`setRuntimeAutoApprove`), scope `conversation` (reset when
+RuntimeManager creates a new conversation) or `runtime`. The shield NEVER
+overrides: destructive requests, DESTRUCTIVE category, untrusted-workspace
+blocks, explicit user denies, or `deny` category rules. Backend is
+authoritative — the GUI toggles optimistically and re-syncs from the
+`AUTO_APPROVE_STATE` message the manager echoes.
+
+**Persistent per-category rules (Settings → Auto Approve):**
+`PermissionManager` holds `PermissionRule` (allow/ask/deny) per category
+(READ/MODIFY/EXECUTE/EXTERNAL/DESTRUCTIVE), persisted through the
+`PermissionRulesStore` interface (Memento key `codeviaCursor.permissionRules`
+in `extension.ts`). DESTRUCTIVE can never be `allow`. Shape lives in
+`src/webview/permissionRules.ts`.
 
 ### Modification rules
 - **The AI agent must never invent tool names.** To add a tool: add an entry
@@ -349,7 +379,8 @@ views, batches UI syncs (`scheduleUiSync` → one rAF per event burst).
 
 ### GUI ↔ backend communication
 `GuiToHost` messages (SEND_PROMPT, NEW_SESSION, SELECT_SESSION,
-GET_TRANSCRIPT, CONNECT_*, SELECT_*_MODEL, APPROVE/DENY_PERMISSION, ...)
+GET_TRANSCRIPT, CONNECT_*, SELECT_*_MODEL, APPROVE/DENY_PERMISSION,
+SET_RUNTIME_AUTO_APPROVE, GET/SET_PERMISSION_RULE, GET_EXTENSION_INFO, ...)
 → `AgentViewProvider.onDidReceiveMessage` → `MessageRouter.handleMessage`
 (result forwarded back if `shouldForwardResult`). Runtime events flow
 continuously: `RuntimeManager.onDidPublishEvent` → `toRuntimeExtensionMessage`
@@ -359,6 +390,55 @@ continuously: `RuntimeManager.onDidPublishEvent` → `toRuntimeExtensionMessage`
 Tool/command lifecycle rendered as exec boxes: `tool_requested → running →
 completed/failed`; commands show progressively updated output. Backend events
 are the source of truth for `phase`; the UI never infers state from text.
+
+### Text streaming UX (2026-09-27)
+Full path: provider chunks (Ollama NDJSON / OpenAI-compatible + OpenRouter
+SSE) → stream gate → `onStreamDelta` → `text_delta` runtime event →
+`AGENT_TEXT_DELTA` → **delta coalescer (~110ms cadence, `main.ts`)** →
+`messageList.upsertStreamingLine` (accumulates into one text node) → paint +
+sticky-bottom scroll on the same frame. Tool-call events are separate
+activity blocks and never merge into the text stream. The streaming line
+keeps the caret (`.streaming-line::after`) while active; finalization
+(`AGENT_MESSAGE`/terminal `AGENT_STATE`) flushes, then replaces the text with
+the finalized model message exactly once. Cancellation and error paths flush
+partially streamed text before appending their error line, then reset the
+coalescer so stale deltas cannot leak into the next run.
+
+### Agent activity blocks & artifacts (2026-09-27)
+- **Thinking block:** `AGENT_THINKING` upserts one live status element
+  (`message-thinking-block`, state `active`/`settled`). It settles — not
+  disappears — when the next tool/response arrives. It represents safe status
+  only, never hidden reasoning (classification gates in the loop).
+- **Artifact cards:** `FILE_CHANGE` / `FILE_CHANGE_REVERTED` render as
+  artifact cards (path, +N −N, Created/Updated/Reverted, Open/View changes/
+  Keep/Revert) via `messageList.upsertArtifact`, matched by `changeId`.
+  Artifacts are derived ONLY from real file_change events — none are invented.
+- **Empty-state watermark:** `assets/spider-icon.png` is copied to
+  `dist/gui/` by esbuild, its webview URI injected as `<meta name="spider-logo">
+  by AgentViewProvider, and rendered (pointer-events: none, ~7-9% opacity,
+  theme-aware, reduced-motion safe) only while the conversation is empty.
+- **Composer toolbar:** model selector + shield live in the composer
+  (`createComposer`), built once, updated in place. The model options derive
+  from the SAME provider state as Settings (no second catalog); changing the
+  model posts the same SELECT_*_MODEL messages Settings uses. The shield
+  toggles optimistically and syncs from the authoritative AUTO_APPROVE_STATE.
+
+### Settings information architecture (2026-09-27)
+`views/settingsView.ts` renders a two-column layout: fixed-width sticky
+sidebar (Models / Agent Behaviour / Auto Approve / Indexing / About Spider) +
+responsive content column (`settings-layout` flex, not grid — sidebar cannot
+compress content). Section state: `AppState.settingsSection`.
+- **Models** — the existing provider cards (single provider config store).
+- **Agent Behaviour** — documentation of code-fixed behavior only
+  (MAX_TOOL_ITERATIONS, mode, thinking display, zero-token restore); no fake
+  controls for unsupported settings.
+- **Auto Approve** — per-category Allow/Ask/Deny (persistent rules, see §5)
+  plus the temporary shield state. Destructive is pinned to Ask.
+- **Indexing** — no indexing system exists (src/context is editor context
+  only); the section is explicitly marked "Not implemented yet" — no fake
+  progress.
+- **About Spider** — logo, version/publisher/license/provider from
+  `EXTENSION_INFO` (populated at webview resolve from `EXTENSION_VERSION`).
 
 ## 11. Session & History Architecture
 
@@ -414,6 +494,16 @@ are the source of truth for `phase`; the UI never infers state from text.
   `agent/*`, `auth/*`, `permissions/*`, `shared/*`.
 - vscode is mocked where needed (EventEmitter stub, see
   `runtimeManager.usage.test.ts`); filesystem tests use `fs.mkdtemp`.
+- Shield/auto-approve → `permissions/runtimeAutoApprove.test.ts` (policy
+  precedence, deny-wins, conversation reset, RuntimeManager integration) and
+  `webview/messageRouter.autoApprove.test.ts` (authoritative echo, rules,
+  validation).
+- SSE streaming → `runtime/openaiCompatible/sseStream.test.ts` (delta
+  assembly, tool-fragment merging + id preservation, tool-JSON never in
+  deltas, stream:true/false gating, OpenRouter round-trip).
+- Streaming UX coalescing → `gui/streamCoalescer.test.ts` (cadence batching,
+  immediate first paint, idle rescheduling, single final flush, cancellation),
+  using a fake scheduler — no real timers in tests.
 - **What to test when touching a subsystem:**
   - agent loop → `inferenceAgentLoop.test.ts` + `thinkingSafety` +
     `invalidToolRecovery` (add tool-id lifecycle cases there or in
@@ -451,6 +541,13 @@ are the source of truth for `phase`; the UI never infers state from text.
 13. Keep GUI rendering in-place: never rebuild the message list per event
     (this caused real unclickable-button bugs).
 14. `gui/src/protocol.ts` and `src/webview/types.ts` must stay in sync.
+15. The shield is convenience, never a bypass: trust, destructive requests,
+    deny rules, and explicit user denies always win over runtime
+    auto-approve. Conversation-scope shields reset on new conversations.
+16. Artifacts come only from real file_change events; never synthesize them
+    in the GUI.
+17. User-facing chat UI never says "Session" for a conversation (internal ids
+    keep the name).
 
 ## 15. Known Bugs / Limitations
 
@@ -471,9 +568,10 @@ are the source of truth for `phase`; the UI never infers state from text.
   empty-session dedupe.
 
 ### Active / Limitations
-- Chat completions use `stream: false` on OpenAI-compatible/OpenRouter paths;
-  text appears per assistant message rather than token-streamed (Ollama and
-  Mock stream). The GUI already handles deltas when provided.
+- Chat completions now stream (`stream: true` + SSE) on OpenAI-compatible and
+  OpenRouter whenever a delta hook is present; Ollama and Mock stream via
+  their own paths. Non-streaming JSON calls remain for capability checks and
+  tests.
 - In-runtime model history is memory-only; after a VS Code restart a session
   continues with an empty model history (transcript display is preserved).
 - Cursor SDK path is legacy; restored sessions skip non-cursor providers in
@@ -507,6 +605,28 @@ are the source of truth for `phase`; the UI never infers state from text.
   the model history and the user-visible history decoupled.
 - **In-place GUI updates** — the message list mutates instead of rebuilding;
   fixes both click reliability and streaming performance.
+- **Two-layer streaming coalescing (2026-09-27)** — deltas are never painted
+  per token or per event. The GUI controller coalesces host deltas on a
+  ~110ms cadence (`gui/src/streamCoalescer.ts`, injectable scheduler for
+  deterministic tests), and the message list accumulates chunks into ONE text
+  node (append + repaint, never rebuild). The first chunk paints immediately
+  (no start latency); idle gaps cancel the timer; `close()` flushes the tail
+  exactly once, so finalization cannot duplicate text.
+- **Turn boundaries reset the stream segment** — thinking blocks, tool calls,
+  and command blocks call `endStreamingTurn()` (flush + fresh accumulator),
+  so assistant text before/after a tool block are separate lines and tool
+  events stay visually independent from text streaming.
+- **One authorization pipeline (2026-09-27)** — trust → deny → auto-allow →
+  shield → prompt is defined once in `PermissionManager.authorize` so the
+  shield can never be wired around the hard gates.
+- **Shield state is backend-authoritative** — the GUI flips optimistically
+  and re-syncs from the `AUTO_APPROVE_STATE` echo; a conversation-scope
+  shield resets when a new conversation is created.
+- **SSE streaming reuses the same classification downstream (2026-09-27)** —
+  streamed tool-call fragments are merged then parsed by
+  `parseNativeToolCalls` exactly like non-streamed output, and delta text
+  passes through the same stream gate as Ollama, so no second safety path
+  exists.
 - **Secrets stay in SecretStorage; config persistence holds no credentials** —
   restore re-attaches the OpenRouter key at activation.
 
@@ -518,11 +638,23 @@ are the source of truth for `phase`; the UI never infers state from text.
   only); exec-box agent UI (thinking/tool/command lifecycle); streaming
   rework (in-place updates, rAF batching, sticky scroll, reduced-motion);
   optimistic New-conversation reset + host-side dedupe (+ tests).
+- **Completed (2026-09-27, UI/agent experience redesign):** real SSE token
+  streaming for OpenAI-compatible + OpenRouter (shared `sseStream.ts` +
+  `streamGate.ts`, tool-fragment assembly, id preservation, + tests);
+  runtime auto-approve shield (policy + manager + RuntimeManager pipeline,
+  backend-authoritative echo, conversation-scope reset, deny/destructive/trust
+  precedence, + tests); persistent per-category permission rules
+  (Settings → Auto Approve, + tests); composer model selector + shield
+  toolbar; Thinking status block (active/settled); artifact cards from
+  file_change events; Spider watermark empty state; Settings sidebar IA
+  (Models / Agent Behaviour / Auto Approve / Indexing / About Spider);
+  `AUTO_APPROVE_STATE` / `PERMISSION_RULES` / `EXTENSION_INFO` protocol
+  messages; session-terminology sweep in chat UI.
 - **Current:** documentation/context (this file). All checks green:
-  typecheck, lint (0 warnings), 270 unit tests, compile.
-- **Next planned:** real token streaming for OpenAI-compatible/OpenRouter
-  (`stream: true` + SSE parsing) reusing the existing `onStreamDelta` path;
-  per-conversation titles; collapsible exec boxes.
+  typecheck, lint (0 warnings), 302 unit tests, compile.
+- **Next planned:** per-conversation titles; collapsible exec boxes;
+  workspace indexing (reserved Settings section exists, honestly marked);
+  agent behaviour settings if/when the backend supports them.
 - **Blockers:** none known.
 
 ## 18. AI Agent Instructions
