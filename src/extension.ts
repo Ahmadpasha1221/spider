@@ -45,6 +45,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     createDefaultPermissionPolicy({
       isWorkspaceTrusted: () => vscode.workspace.isTrusted,
     }),
+    {
+      load: () => {
+        const raw = context.workspaceState.get<unknown>("codeviaCursor.permissionRules");
+        return Array.isArray(raw) ? (raw as ReadonlyArray<{ category: string; rule: string }>) : [];
+      },
+      save: (snapshot) => {
+        void context.workspaceState.update(
+          "codeviaCursor.permissionRules",
+          Object.entries(snapshot.rules).map(([category, rule]) => ({ category, rule })),
+        );
+      },
+    },
   );
 
   const sessionStore = new SessionStore(context.workspaceState);
@@ -64,7 +76,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     providerConfigStore,
   });
   const messageRouter = new MessageRouter(
-    agentManager, getWorkspacePath(), connection, cursorClient, runtimeManager, secretStorage,
+    agentManager,
+    getWorkspacePath(),
+    connection,
+    cursorClient,
+    runtimeManager,
+    secretStorage,
+    { permissionManager },
   );
   const agentViewProvider = new AgentViewProvider(
     context.extensionUri,
@@ -72,11 +90,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     messageRouter,
     connection,
     runtimeManager,
+    permissionManager,
   );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("codeviaCursor.agent", agentViewProvider, {
       webviewOptions: { retainContextWhenHidden: true },
+    }),
+  );
+
+  // Shield toggles flow through the same event bridge as runtime events so
+  // every webview re-syncs to the authoritative backend state.
+  context.subscriptions.push(
+    permissionManager.onDidRequest((event) => {
+      if (event.type === "runtime_auto_approve_changed") {
+        agentViewProvider.postMessage(messageRouter.toAutoApproveStateMessage(event.state));
+      }
     }),
   );
 

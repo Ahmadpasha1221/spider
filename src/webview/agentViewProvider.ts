@@ -8,6 +8,8 @@ import { RuntimeManager } from "../runtime/runtimeManager";
 import type { RuntimeEvent } from "../runtime/runtimeTypes";
 import { MessageRouter } from "./messageRouter";
 import { ExtensionMessage, isExtensionMessage, SessionListItem } from "./types";
+import { EXTENSION_VERSION } from "../shared/constants";
+import type { PermissionManager } from "../permissions/permissionManager";
 
 export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private view?: vscode.WebviewView;
@@ -21,6 +23,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     private readonly messageRouter: MessageRouter,
     private readonly connection?: CursorConnection,
     private readonly runtimeManager?: RuntimeManager,
+    private readonly permissionManager?: PermissionManager,
   ) {}
 
   resolveWebviewView(
@@ -69,6 +72,23 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     });
 
     this.postSessionList();
+    this.postMessage(this.messageRouter.toAutoApproveStateMessage(
+      this.permissionManager?.getRuntimeAutoApprove() ?? { enabled: false, scope: "conversation", updatedAt: 0 },
+    ));
+    this.postMessage({
+      type: "EXTENSION_INFO",
+      info: {
+        displayName: "Spider",
+        version: EXTENSION_VERSION,
+        publisher: "codevia",
+        license: "MIT",
+        repositoryUrl: "https://github.com/codevia/codevia-cursor",
+        activeProvider: this.runtimeManager?.provider,
+        ...(this.runtimeManager?.getProviderConfig()?.modelId
+          ? { activeModelId: this.runtimeManager.getProviderConfig()?.modelId }
+          : {}),
+      },
+    });
     void this.bootstrapAuth();
   }
 
@@ -134,11 +154,13 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "gui", "main.css"));
 
     let html = fs.readFileSync(htmlPath, "utf8");
+    const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "dist", "gui", "spider-icon.png"));
     html = html
       .replaceAll("{{cspSource}}", webview.cspSource)
       .replaceAll("{{nonce}}", nonce)
       .replaceAll("{{scriptUri}}", scriptUri.toString())
-      .replaceAll("{{styleUri}}", styleUri.toString());
+      .replaceAll("{{styleUri}}", styleUri.toString())
+      .replaceAll("{{logoUri}}", logoUri.toString());
     return html;
   }
 

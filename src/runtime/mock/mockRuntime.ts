@@ -192,7 +192,7 @@ export class MockRuntime implements AgentRuntime {
   async sendMessage(request: RuntimeSendRequest, emit: RuntimeEventSink): Promise<void> {
     const session = this.sessions.get(request.sessionId);
     if (!session) {
-      throw createRuntimeError("session_not_found", `Session ${request.sessionId} not found`);
+      throw createRuntimeError("session_not_found", `Conversation ${request.sessionId} not found`);
     }
 
     const scenario = this.config.scenario ?? "default";

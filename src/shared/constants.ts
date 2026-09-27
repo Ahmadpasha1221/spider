@@ -1,6 +1,8 @@
 export const EXTENSION_ID = "codevia-cursor";
 /** User-facing product name shown in the UI and logs. */
 export const EXTENSION_NAME = "Spider";
+/** Extension version for Settings → About Spider (kept in sync with package.json). */
+export const EXTENSION_VERSION = "0.1.0";
 
 export const COMMANDS = {
   openAgent: "codeviaCursor.openAgent",
