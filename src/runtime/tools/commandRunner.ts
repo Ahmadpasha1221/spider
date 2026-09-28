@@ -15,6 +15,12 @@ export interface RunCommandOptions {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
+  /**
+   * Streamed output hook: fired per stdout/stderr chunk so the UI can show
+   * progress while the command runs. The resolved result still carries the
+   * complete (capped) output.
+   */
+  readonly onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -51,10 +57,14 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
     options.signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout?.on("data", (chunk: Buffer | string) => {
-      stdout = appendCapped(stdout, String(chunk));
+      const text = String(chunk);
+      stdout = appendCapped(stdout, text);
+      options.onOutput?.("stdout", text);
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
-      stderr = appendCapped(stderr, String(chunk));
+      const text = String(chunk);
+      stderr = appendCapped(stderr, text);
+      options.onOutput?.("stderr", text);
     });
     child.on("error", (error) => {
       finish(() => reject(error));

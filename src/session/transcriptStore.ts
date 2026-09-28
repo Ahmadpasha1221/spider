@@ -15,6 +15,12 @@ import * as vscode from "vscode";
 export type TranscriptEntryKind = "user" | "assistant" | "thinking" | "tool" | "command" | "error" | "system";
 
 export interface TranscriptEntry {
+  /**
+   * Stable message id. Present on entries the chat UI can act on (assistant
+   * replies and user prompts) so Copy/Delete can target the exact persisted
+   * entry. Older transcripts without ids load fine (id stays undefined).
+   */
+  readonly id?: string;
   readonly kind: TranscriptEntryKind;
   readonly text: string;
   readonly timestamp: number;
@@ -92,6 +98,52 @@ export class TranscriptStore {
     }
   }
 
+  /**
+   * Removes one entry by id (message Delete). The JSONL file is rewritten
+   * without that entry, serialized behind the append queue so a concurrent
+   * append can never be dropped. Unparseable lines (torn tail) are discarded,
+   * matching `load()`.
+   */
+  removeEntry(sessionId: string, entryId: string): Promise<void> {
+    if (!isValidSessionId(sessionId) || typeof entryId !== "string" || entryId.length === 0) {
+      return Promise.resolve();
+    }
+    const previous = this.queues.get(sessionId) ?? Promise.resolve();
+    const next = previous
+      .then(async () => {
+        let raw: string;
+        try {
+          raw = await fs.readFile(this.fileFor(sessionId), "utf8");
+        } catch {
+          return;
+        }
+        const kept: string[] = [];
+        for (const line of raw.split("\n")) {
+          if (line.trim().length === 0) {
+            continue;
+          }
+          let record: Record<string, unknown>;
+          try {
+            record = JSON.parse(line) as Record<string, unknown>;
+          } catch {
+            // Torn tail: drop it (load() would ignore it anyway).
+            continue;
+          }
+          if (record && typeof record === "object" && record.id === entryId) {
+            continue;
+          }
+          kept.push(line);
+        }
+        await fs.mkdir(this.root, { recursive: true });
+        await fs.writeFile(this.fileFor(sessionId), kept.length > 0 ? `${kept.join("\n")}\n` : "", "utf8");
+      })
+      .catch(() => {
+        // Deletion is best-effort; it must never break a run.
+      });
+    this.queues.set(sessionId, next);
+    return next;
+  }
+
   private fileFor(sessionId: string): string {
     return path.join(this.root, `${sessionId}.jsonl`);
   }
@@ -124,6 +176,7 @@ function parseEntry(value: unknown): TranscriptEntry | undefined {
     return undefined;
   }
   return {
+    ...(typeof record.id === "string" && record.id.length > 0 ? { id: record.id } : {}),
     kind: record.kind as TranscriptEntryKind,
     text: record.text,
     timestamp: typeof record.timestamp === "number" ? record.timestamp : Date.now(),

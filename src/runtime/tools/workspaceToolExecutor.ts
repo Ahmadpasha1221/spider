@@ -54,7 +54,14 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       case "delete_file":
         return this.deleteFile(workspacePath, requiredString(input, "path"));
       case "run_command":
-        return this.runCommand(workspacePath, requiredString(input, "command"), stringField(input, "cwd"), numberField(input, "timeoutMs"), context.signal);
+        return this.runCommand(
+          workspacePath,
+          requiredString(input, "command"),
+          stringField(input, "cwd"),
+          numberField(input, "timeoutMs"),
+          context.signal,
+          context.onOutput,
+        );
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
@@ -158,6 +165,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     cwd: string | undefined,
     timeoutMs: number | undefined,
     signal?: AbortSignal,
+    onOutput?: (stream: "stdout" | "stderr", chunk: string) => void,
   ): Promise<unknown> {
     const workingDirectory = resolveWorkspacePath(workspacePath, cwd && cwd.length > 0 ? cwd : ".");
     return runWorkspaceCommand({
@@ -165,6 +173,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       cwd: workingDirectory,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       signal,
+      ...(onOutput ? { onOutput } : {}),
     });
   }
 }

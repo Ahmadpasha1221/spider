@@ -37,7 +37,9 @@
     "ui"
   ],
   "activationEvents": [
-    "onAuthentication:codeviaCursor"
+    "onView:codeviaCursor.agent",
+    "onCommand:codeviaCursor.openAgent",
+    "onCommand:codeviaCursor.openSettings"
   ],
   "authentication": {
     "providers": [
@@ -57,6 +59,34 @@
           "icon": "assets/spider-icon.png"
         }
       ]
+    },
+    "chatParticipants": [
+      {
+        "id": "codeviaCursor.spider",
+        "name": "spider",
+        "fullName": "Spider",
+        "description": "AI coding agent powered by Cursor SDK",
+        "isSticky": true,
+        "commands": [
+          { "name": "explain", "description": "Explain selected code" },
+          { "name": "fix", "description": "Fix issues in selection" },
+          { "name": "test", "description": "Generate tests" }
+        ]
+      }
+    ],"configuration": {
+      "title": "Spider",
+      "properties": {
+        "codeviaCursor.model": {
+          "type": "string",
+          "default": "",
+          "description": "Model used by the Spider agent."
+        },
+        "codeviaCursor.autoApply": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically apply edits from the agent."
+        }
+      }
     },
     "views": {
       "codeviaCursor": [

@@ -56,7 +56,13 @@ export class MessageRouter {
     switch (typed.type) {
       case "SEND_PROMPT": {
         if (this.usesManagedRuntime() && this.runtimeManager) {
-          await this.runtimeManager.startTask(typed.sessionId, typed.prompt);
+          await this.runtimeManager.startTask(
+            typed.sessionId,
+            typed.prompt,
+            undefined,
+            false,
+            typed.messageId,
+          );
           return { success: true };
         }
         if (this.cursorClient && !this.cursorClient.hasApiKey()) {
@@ -159,6 +165,14 @@ export class MessageRouter {
         const scope = typed.scope === "runtime" ? "runtime" : "conversation";
         const state = this.permissionManager.setRuntimeAutoApprove(typed.enabled, scope);
         return { type: "AUTO_APPROVE_STATE", enabled: state.enabled, scope: state.scope };
+      }
+      case "DELETE_MESSAGE": {
+        // Chat UI Delete: drop the message from the persisted transcript so a
+        // History restore cannot resurrect it. The GUI already removed the row.
+        if (this.usesManagedRuntime() && this.runtimeManager) {
+          await this.runtimeManager.deleteTranscriptEntry(typed.sessionId, typed.messageId);
+        }
+        return { success: true };
       }
       case "GET_PERMISSION_RULES": {
         if (!this.permissionManager) {
@@ -296,7 +310,11 @@ export class MessageRouter {
       case "thinking":
         return { type: "AGENT_THINKING", message: event.message };
       case "assistant_message":
-        return { type: "AGENT_MESSAGE", message: event.message };
+        return {
+          type: "AGENT_MESSAGE",
+          message: event.message,
+          ...(event.messageId ? { messageId: event.messageId } : {}),
+        };
       case "text_delta":
         return { type: "AGENT_TEXT_DELTA", sessionId: event.sessionId, text: event.text };
       case "usage":
@@ -341,6 +359,7 @@ export class MessageRouter {
           stdout: event.stdout,
           stderr: event.stderr,
           exitCode: event.exitCode,
+          ...(event.partial ? { partial: true } : {}),
         };
       case "permission_request":
         return {
@@ -617,6 +636,9 @@ export class MessageRouter {
         if (typeof typed.prompt !== "string" || typeof typed.sessionId !== "string") {
           throw new Error("Invalid SEND_PROMPT message");
         }
+        if (typed.messageId !== undefined && typeof typed.messageId !== "string") {
+          throw new Error("Invalid SEND_PROMPT message");
+        }
         return message as WebviewMessage;
       case "CANCEL_RUN":
       case "STOP_AGENT":
@@ -671,6 +693,11 @@ export class MessageRouter {
         }
         if (typed.scope !== undefined && typed.scope !== "conversation" && typed.scope !== "runtime") {
           throw new Error("Invalid SET_RUNTIME_AUTO_APPROVE message");
+        }
+        return message as WebviewMessage;
+      case "DELETE_MESSAGE":
+        if (typeof typed.sessionId !== "string" || typeof typed.messageId !== "string" || typed.messageId.length === 0) {
+          throw new Error("Invalid DELETE_MESSAGE message");
         }
         return message as WebviewMessage;
       case "GET_PERMISSION_RULES":

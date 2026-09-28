@@ -198,7 +198,14 @@ export type RuntimeEvent =
   | { type: "status"; sessionId: string; status: RuntimeSessionStatus; timestamp: number }
   | { type: "thinking"; sessionId: string; message: string; timestamp: number }
   | { type: "text_delta"; sessionId: string; text: string; timestamp: number }
-  | { type: "assistant_message"; sessionId: string; message: string; timestamp: number }
+  | {
+      type: "assistant_message";
+      sessionId: string;
+      message: string;
+      /** Transcript entry id so the chat UI can Copy/Delete this exact reply. */
+      messageId?: string;
+      timestamp: number;
+    }
   | { type: "text_delta"; sessionId: string; text: string; timestamp: number }
   | { type: "usage"; sessionId: string; usage: RuntimeUsage; timestamp: number }
   | { type: "file_change"; sessionId: string; change: FileChangeSummary; timestamp: number }
@@ -216,6 +223,12 @@ export type RuntimeEvent =
       stdout: string;
       stderr: string;
       exitCode: number | null;
+      /**
+       * True for incremental chunks emitted while the command is still
+       * running; the final event (partial absent) carries the authoritative
+       * exit code and complete output.
+       */
+      partial?: boolean;
       timestamp: number;
     }
   | { type: "permission_request"; sessionId: string; request: PermissionRequest; timestamp: number }
@@ -285,6 +298,11 @@ export interface ResolvedRuntimeConfig {
 export interface RuntimeToolExecutorContext {
   readonly session: CodeviaSession;
   readonly signal?: AbortSignal;
+  /**
+   * Live output hook for long-running tools (run_command). Chunks reach the UI
+   * while the command runs instead of only when it exits.
+   */
+  readonly onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
 }
 
 export interface RuntimeToolExecutor {

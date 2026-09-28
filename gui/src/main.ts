@@ -64,6 +64,7 @@ const messageList = createMessageList(messageListRoot, {
   onAcceptChange: (changeId) => postToHost({ type: "RESOLVE_FILE_CHANGE", changeId, decision: "ACCEPT" }),
   onRejectChange: (changeId) => postToHost({ type: "RESOLVE_FILE_CHANGE", changeId, decision: "REJECT" }),
   onOpenArtifact: (path) => postToHost({ type: "OPEN_FILE", path }),
+  onDeleteMessage: deleteMessage,
 });
 const composer = createComposer(composerRoot, {
   onSend: handleSend,
@@ -264,7 +265,7 @@ function handleHostMessage(message: HostToGui): void {
         messageList.finishStreamingLine("");
         break;
       }
-      messageList.finishStreamingLine(text);
+      messageList.finishStreamingLine(text, message.messageId);
       chatLineChanged = true;
       break;
     }
@@ -357,9 +358,11 @@ function handleHostMessage(message: HostToGui): void {
       break;
     }
     case "AGENT_COMMAND_OUTPUT": {
+      // Partial chunks arrive while the command runs (running: true); the
+      // final event carries the authoritative exit code.
       messageList.upsertCommandLine({
         command: message.command,
-        running: false,
+        running: message.partial === true,
         stdout: message.stdout,
         stderr: message.stderr,
         exitCode: message.exitCode,
@@ -598,6 +601,26 @@ function toggleAutoApprove(enabled: boolean): void {
   render();
 }
 
+/** Random id with a fallback for webview hosts without crypto.randomUUID. */
+function newMessageId(): string {
+  const random = globalThis.crypto?.randomUUID?.();
+  return random ?? `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * Message Delete: the message list already removed the row; this drops the
+ * message from view state and asks the host to erase the transcript entry so
+ * a History restore cannot bring it back.
+ */
+function deleteMessage(messageId: string): void {
+  state.messages = state.messages.filter((line) => line.messageId !== messageId);
+  if (state.activeSessionId) {
+    postToHost({ type: "DELETE_MESSAGE", sessionId: state.activeSessionId, messageId });
+  }
+  scheduleUiSync();
+}
+
+
 function setPermissionRule(category: PermissionRuleCategory, rule: PermissionRule): void {
   state.permissionRules = { ...state.permissionRules, [category]: rule };
   postToHost({ type: "SET_PERMISSION_RULE", category, rule });
@@ -678,10 +701,13 @@ function sendPrompt(prompt: string): void {
   state.lastPrompt = trimmed;
   state.running = true;
   state.phase = "submitting";
-  const line: ChatLine = { role: "user", text: trimmed };
+  // The id is generated here and echoed back with the prompt, so the message
+  // has one stable identity in both the UI and the persisted transcript.
+  const messageId = newMessageId();
+  const line: ChatLine = { role: "user", text: trimmed, messageId };
   state.messages.push(line);
   messageList.append([line]);
-  postToHost({ type: "SEND_PROMPT", prompt: trimmed, sessionId: state.activeSessionId });
+  postToHost({ type: "SEND_PROMPT", prompt: trimmed, sessionId: state.activeSessionId, messageId });
   scheduleUiSync();
 }
 
@@ -708,6 +734,7 @@ function resolvePermission(requestId: string, decision: "ALLOW" | "DENY"): void 
 }
 
 function toChatLine(entry: {
+  id?: string;
   kind: "user" | "assistant" | "thinking" | "tool" | "command" | "error" | "system";
   text: string;
   toolName?: string;
@@ -718,9 +745,9 @@ function toChatLine(entry: {
 }): ChatLine {
   switch (entry.kind) {
     case "user":
-      return { role: "user", text: entry.text };
+      return { role: "user", text: entry.text, ...(entry.id ? { messageId: entry.id } : {}) };
     case "assistant":
-      return { role: "agent", text: entry.text };
+      return { role: "agent", text: entry.text, ...(entry.id ? { messageId: entry.id } : {}) };
     case "thinking":
       return { role: "thinking", text: entry.text };
     case "error":

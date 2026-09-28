@@ -24,6 +24,12 @@ export type ExecStatus = "running" | "completed" | "failed";
 export interface ChatLine {
   role: "user" | "agent" | "thinking" | "error" | "system" | "tool";
   text: string;
+  /**
+   * Stable id for messages the user can act on (Copy/Delete). Assistant ids
+   * come from the backend transcript entry; user ids are generated on send and
+   * recorded with the prompt, so Delete reaches conversation persistence.
+   */
+  messageId?: string;
   streaming?: boolean;
   permission?: {
     requestId: string;
