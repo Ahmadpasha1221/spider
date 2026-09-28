@@ -43,6 +43,13 @@ interface ActiveRun {
   providerSessionId?: string;
 }
 
+/** Live command-output flush cadence: ~8 updates/second, not per chunk. */
+const COMMAND_STREAM_INTERVAL_MS = 120;
+
+function commandTextFromCall(call: RuntimeToolCall): string {
+  return isRecord(call.input) && typeof call.input.command === "string" ? call.input.command : "";
+}
+
 export class RuntimeManager implements vscode.Disposable {
   private readonly runtimes = new Map<AgentRuntime["provider"], AgentRuntime>();
   private readonly sessions = new Map<string, CodeviaSession>();
@@ -56,6 +63,15 @@ export class RuntimeManager implements vscode.Disposable {
   private readonly toolRouter: ToolRouter;
   private readonly reviewManager = new FileChangeReviewManager();
   private readonly usageBySession = new Map<string, RuntimeUsage>();
+  /**
+   * Live command-output buffers, keyed by toolCallId. Chunks are coalesced and
+   * flushed on a short interval so a chatty command cannot flood the webview;
+   * the agent loop's final command_output event remains authoritative.
+   */
+  private readonly commandStreams = new Map<
+    string,
+    { sessionId: string; stdout: string; stderr: string; timer?: ReturnType<typeof setTimeout> }
+  >();
 
   readonly onDidPublishEvent = this.emitter.event;
 
@@ -298,6 +314,19 @@ export class RuntimeManager implements vscode.Disposable {
     return true;
   }
 
+  /**
+   * Removes one message from a conversation's persisted transcript (chat UI
+   * Delete). UI removal is optimistic; this makes deletion durable so a
+   * History restore cannot resurrect the message.
+   */
+  async deleteTranscriptEntry(sessionId: string, entryId: string): Promise<void> {
+    try {
+      await this.options.transcriptStore?.removeEntry(sessionId, entryId);
+    } catch {
+      // Deletion is best-effort and must never break the UI.
+    }
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
     await this.cancelTask(sessionId);
     this.sessions.delete(sessionId);
@@ -388,6 +417,7 @@ export class RuntimeManager implements vscode.Disposable {
     prompt: string,
     cancellationToken?: vscode.CancellationToken,
     retry = false,
+    messageId?: string,
   ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -401,8 +431,16 @@ export class RuntimeManager implements vscode.Disposable {
     }
 
     this.lastPrompts.set(sessionId, prompt);
-    await this.recordTranscript(sessionId, { kind: "user", text: prompt, timestamp: Date.now() });
+    await this.recordTranscript(sessionId, {
+      ...(messageId ? { id: messageId } : {}),
+      kind: "user",
+      text: prompt,
+      timestamp: Date.now(),
+    });
 
+    // Agent mode is an internal runtime concern, never a user choice: the
+    // shipped path always runs with the full registered tool set so the model
+    // can autonomously pick any tool (write_file, edit_file, run_command…).
     const mode: AgentMode = DEFAULT_AGENT_MODE;
     const runtime = this.getRequiredRuntime(session.provider);
     const controller = new AbortController();
@@ -478,6 +516,7 @@ export class RuntimeManager implements vscode.Disposable {
     } finally {
       cancellationSubscription?.dispose();
       this.activeRuns.delete(sessionId);
+      this.clearSessionCommandStreams(sessionId);
       this.options.permissionManager.cancelSessionRequests(sessionId);
     }
   }
@@ -591,9 +630,82 @@ export class RuntimeManager implements vscode.Disposable {
     }
 
     await this.captureFileChange(sessionId, call, "begin");
-    const response = await this.toolRouter.route(call, { session, signal }, (toolCall, toolSignal) => this.authorizeTool(sessionId, toolCall, toolSignal), { mode });
+    const context = {
+      session,
+      signal,
+      // Long-running commands stream output to the UI while they run; the
+      // agent loop's final command_output event still carries the exit code.
+      ...(call.name === "run_command"
+        ? {
+            onOutput: (stream: "stdout" | "stderr", chunk: string) =>
+              this.pushCommandStream(sessionId, call, stream, chunk),
+          }
+        : {}),
+    };
+    const response = await this.toolRouter.route(
+      call,
+      context,
+      (toolCall, toolSignal) => this.authorizeTool(sessionId, toolCall, toolSignal),
+      { mode },
+    );
     await this.captureFileChange(sessionId, call, "end", response);
     return response;
+  }
+
+  /**
+   * Coalesces a live command-output chunk and flushes the running total on a
+   * short interval, so a chatty command yields at most ~8 UI updates/second
+   * instead of one per data chunk.
+   */
+  private pushCommandStream(
+    sessionId: string,
+    call: RuntimeToolCall,
+    stream: "stdout" | "stderr",
+    chunk: string,
+  ): void {
+    const existing = this.commandStreams.get(call.id) ?? { sessionId, stdout: "", stderr: "" };
+    if (stream === "stdout") {
+      existing.stdout += chunk;
+    } else {
+      existing.stderr += chunk;
+    }
+    if (!existing.timer) {
+      existing.timer = setTimeout(() => {
+        existing.timer = undefined;
+        this.publishEvent({
+          type: "command_output",
+          sessionId,
+          command: commandTextFromCall(call),
+          toolCallId: call.id,
+          stdout: existing.stdout,
+          stderr: existing.stderr,
+          exitCode: null,
+          partial: true,
+          timestamp: Date.now(),
+        });
+      }, COMMAND_STREAM_INTERVAL_MS);
+    }
+    this.commandStreams.set(call.id, existing);
+  }
+
+  private clearCommandStream(toolCallId: string): void {
+    const stream = this.commandStreams.get(toolCallId);
+    if (stream?.timer) {
+      clearTimeout(stream.timer);
+    }
+    this.commandStreams.delete(toolCallId);
+  }
+
+  private clearSessionCommandStreams(sessionId: string): void {
+    for (const [toolCallId, stream] of this.commandStreams) {
+      if (stream.sessionId !== sessionId) {
+        continue;
+      }
+      if (stream.timer) {
+        clearTimeout(stream.timer);
+      }
+      this.commandStreams.delete(toolCallId);
+    }
   }
 
   /** Records write_file / edit_file mutations for review and revert. */
@@ -708,34 +820,52 @@ export class RuntimeManager implements vscode.Disposable {
       return;
     }
 
-    this.recordTranscriptEvent(sessionId, event);
-
-    if (event.type === "usage") {
-      this.accumulateUsage(sessionId, event.usage);
+    // The final command output is authoritative: drop the coalescing buffer
+    // for that tool call so no late partial flush can follow it.
+    if (event.type === "command_output" && !event.partial) {
+      this.clearCommandStream(event.toolCallId);
     }
 
-    if (event.type === "status") {
-      const status = this.normalizeRuntimeStatus(event.status);
+    const published = this.recordTranscriptEvent(sessionId, event);
+
+    if (published.type === "usage") {
+      this.accumulateUsage(sessionId, published.usage);
+    }
+
+    if (published.type === "status") {
+      const status = this.normalizeRuntimeStatus(published.status);
       this.updateSession(sessionId, { status });
-    } else if (event.type === "completed") {
+    } else if (published.type === "completed") {
       this.updateSession(sessionId, { status: "COMPLETED" });
-    } else if (event.type === "cancelled") {
+    } else if (published.type === "cancelled") {
       this.updateSession(sessionId, { status: "CANCELLED" });
-    } else if (event.type === "error") {
+    } else if (published.type === "error") {
       this.updateSession(sessionId, {
         status: "FAILED",
-        error: { message: event.error.message, category: event.error.code },
+        error: { message: published.error.message, category: published.error.code },
       });
     }
 
-    this.publishEvent(event);
+    this.publishEvent(published);
   }
 
-  private recordTranscriptEvent(sessionId: string, event: RuntimeEvent): void {
-    const entry = transcriptEntryFromEvent(event);
-    if (entry) {
-      void this.recordTranscript(sessionId, entry);
+  /**
+   * Persists the transcript entry for an event and returns the event to
+   * publish. Assistant replies get a stable transcript id (returned as
+   * `messageId`) so the chat UI can Copy/Delete the exact stored entry;
+   * partial command chunks are streamed to the UI but never persisted.
+   */
+  private recordTranscriptEvent(sessionId: string, event: RuntimeEvent): RuntimeEvent {
+    if (event.type === "command_output" && event.partial) {
+      return event;
     }
+    const entry = transcriptEntryFromEvent(event);
+    if (!entry) {
+      return event;
+    }
+    const id = event.type === "assistant_message" ? crypto.randomUUID() : undefined;
+    void this.recordTranscript(sessionId, id ? { ...entry, id } : entry);
+    return id && event.type === "assistant_message" ? { ...event, messageId: id } : event;
   }
 
   private normalizeRuntimeStatus(status: RuntimeSessionStatus): RuntimeSessionStatus {
