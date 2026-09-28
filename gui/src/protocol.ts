@@ -23,7 +23,7 @@ export interface ModelInfo {
 }
 
 export type GuiToHost =
-  | { type: "SEND_PROMPT"; prompt: string; sessionId: string }
+  | { type: "SEND_PROMPT"; prompt: string; sessionId: string; messageId?: string }
   | { type: "TRY_AGAIN"; sessionId: string }
   | { type: "CANCEL_RUN"; sessionId: string }
   | { type: "NEW_SESSION" }
@@ -49,6 +49,8 @@ export type GuiToHost =
   | { type: "SET_RUNTIME_AUTO_APPROVE"; enabled: boolean; scope?: "conversation" | "runtime" }
   | { type: "GET_PERMISSION_RULES" }
   | { type: "SET_PERMISSION_RULE"; category: PermissionRuleCategory; rule: PermissionRule }
+  /** Chat UI Delete: removes a message from the UI and conversation persistence. */
+  | { type: "DELETE_MESSAGE"; sessionId: string; messageId: string }
   | { type: "GET_EXTENSION_INFO" }
   | { type: "OPEN_DIFF"; changeId: string }
   | { type: "RESOLVE_FILE_CHANGE"; changeId: string; decision: "ACCEPT" | "REJECT" }
@@ -90,7 +92,7 @@ export interface FileChangeView {
 
 export type HostToGui =
   | { type: "AGENT_STATE"; state: string }
-  | { type: "AGENT_MESSAGE"; message: string }
+  | { type: "AGENT_MESSAGE"; message: string; messageId?: string }
   | { type: "AGENT_TEXT_DELTA"; sessionId: string; text: string }
   | { type: "AGENT_USAGE"; promptTokens: number; completionTokens: number; totalTokens: number; costUsd?: number }
   | { type: "FILE_CHANGE"; change: FileChangeView }
@@ -98,7 +100,7 @@ export type HostToGui =
   | { type: "AGENT_THINKING"; message: string }
   | { type: "AGENT_TOOL_CALL"; toolCall: { toolCallId?: string; toolName?: string; command?: string; path?: string } }
   | { type: "AGENT_TOOL_RESULT"; result: { toolCallId?: string; toolName?: string; error?: string } }
-  | { type: "AGENT_COMMAND_OUTPUT"; command: string; toolCallId?: string; cwd?: string; stdout: string; stderr: string; exitCode: number | null }
+  | { type: "AGENT_COMMAND_OUTPUT"; command: string; toolCallId?: string; cwd?: string; stdout: string; stderr: string; exitCode: number | null; partial?: boolean }
   | { type: "AGENT_ERROR"; error: string }
   | { type: "PERMISSION_REQUEST"; requestId: string; message: string; command?: string; category?: string; destructive?: boolean }
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
@@ -115,6 +117,7 @@ export type HostToGui =
       type: "TRANSCRIPT";
       sessionId: string;
       entries: Array<{
+        id?: string;
         kind: "user" | "assistant" | "thinking" | "tool" | "command" | "error" | "system";
         text: string;
         timestamp: number;

@@ -8,7 +8,7 @@ export type GuiRuntimeProvider = "cursor" | "local" | "mock" | "openrouter";
 export type LocalProvider = "ollama" | "openai-compatible";
 
 export type WebviewMessage =
-  | { type: "SEND_PROMPT"; prompt: string; sessionId: string }
+  | { type: "SEND_PROMPT"; prompt: string; sessionId: string; messageId?: string }
   | { type: "GET_TRANSCRIPT"; sessionId: string }
   | { type: "CANCEL_RUN"; sessionId: string }
   | { type: "NEW_SESSION"; workspacePath?: string }
@@ -38,6 +38,8 @@ export type WebviewMessage =
   | { type: "SET_RUNTIME_AUTO_APPROVE"; enabled: boolean; scope?: "conversation" | "runtime" }
   | { type: "GET_PERMISSION_RULES" }
   | { type: "SET_PERMISSION_RULE"; category: PermissionRuleCategory; rule: PermissionRule }
+  /** Chat UI Delete: removes a message from UI and conversation persistence. */
+  | { type: "DELETE_MESSAGE"; sessionId: string; messageId: string }
   | { type: "GET_EXTENSION_INFO" };
 
 export type AuthStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -105,7 +107,7 @@ export interface ExtensionInfoView {
 
 export type ExtensionMessage =
   | { type: "AGENT_STATE"; state: AgentState }
-  | { type: "AGENT_MESSAGE"; message: string }
+  | { type: "AGENT_MESSAGE"; message: string; messageId?: string }
   | { type: "AGENT_TEXT_DELTA"; sessionId: string; text: string }
   | { type: "AGENT_USAGE"; promptTokens: number; completionTokens: number; totalTokens: number; costUsd?: number }
   | { type: "FILE_CHANGE"; change: FileChangeView }
@@ -113,7 +115,7 @@ export type ExtensionMessage =
   | { type: "AGENT_THINKING"; message: string }
   | { type: "AGENT_TOOL_CALL"; toolCall: { toolCallId?: string; toolName?: string; command?: string; path?: string } }
   | { type: "AGENT_TOOL_RESULT"; result: { toolCallId?: string; toolName?: string; error?: string } }
-  | { type: "AGENT_COMMAND_OUTPUT"; command: string; toolCallId?: string; cwd?: string; stdout: string; stderr: string; exitCode: number | null }
+  | { type: "AGENT_COMMAND_OUTPUT"; command: string; toolCallId?: string; cwd?: string; stdout: string; stderr: string; exitCode: number | null; partial?: boolean }
   | { type: "AGENT_ERROR"; error: string }
   | { type: "PERMISSION_REQUEST"; requestId: string; message: string; command?: string; category?: string; destructive?: boolean }
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
@@ -140,6 +142,7 @@ export type ExtensionMessage =
       type: "TRANSCRIPT";
       sessionId: string;
       entries: Array<{
+        id?: string;
         kind: "user" | "assistant" | "thinking" | "tool" | "command" | "error" | "system";
         text: string;
         timestamp: number;

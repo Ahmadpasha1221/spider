@@ -9,6 +9,8 @@ type MessageListHandlers = {
   onAcceptChange?: (changeId: string) => void;
   onRejectChange?: (changeId: string) => void;
   onOpenArtifact?: (path: string) => void;
+  /** Message Delete: removes it from the UI and conversation persistence. */
+  onDeleteMessage?: (messageId: string) => void;
 };
 
 /**
@@ -34,8 +36,11 @@ export interface MessageListHandle {
   clear(): void;
   /** Create (or replace) the single streaming assistant line and append a delta chunk. */
   upsertStreamingLine(text: string, handlers?: MessageListHandlers): void;
-  /** Finalize the streaming line into a normal agent line. */
-  finishStreamingLine(finalText: string): void;
+  /**
+   * Finalize the streaming line into a normal agent line. `messageId` is the
+   * transcript entry id, so the finalized reply can be copied or deleted.
+   */
+  finishStreamingLine(finalText: string, messageId?: string): void;
   /**
    * Closes the current streaming turn (flush + reset the accumulator) without
    * removing the painted text. Called at turn boundaries (tool calls, thinking
@@ -207,11 +212,84 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
   }
 
   function appendInteractive(article: HTMLElement, message: ChatLine): void {
+    attachMessageActions(article, message);
     if (message.permission?.pending) {
       article.appendChild(permissionActions(message.permission.requestId, currentHandlers));
     }
     if (message.fileChange && message.fileChange.status === "APPLIED") {
       article.appendChild(fileChangeActions(message.fileChange, currentHandlers));
+    }
+  }
+
+  /**
+   * Copy + Delete for user/assistant messages that carry a stable id. The bar
+   * is CSS-hidden until hover/focus so it never clutters the transcript, and
+   * it mutates in place — no rebuild, so clicks are never eaten.
+   */
+  function attachMessageActions(article: HTMLElement, message: ChatLine): void {
+    if (!message.messageId || (message.role !== "user" && message.role !== "agent")) {
+      return;
+    }
+    if (article.querySelector(".message-actions")) {
+      return;
+    }
+    const messageId = message.messageId;
+    article.dataset.messageId = messageId;
+    const bar = document.createElement("div");
+    bar.className = "message-actions";
+
+    const copy = document.createElement("button");
+    copy.className = "btn btn-ghost btn-small message-action";
+    copy.type = "button";
+    copy.textContent = "Copy";
+    copy.setAttribute("aria-label", "Copy message");
+    copy.addEventListener("click", () => {
+      const body = article.querySelector<HTMLElement>(".message-body");
+      void copyText(body?.textContent ?? "");
+      copy.textContent = "Copied";
+      window.setTimeout(() => {
+        copy.textContent = "Copy";
+      }, 1200);
+    });
+
+    const del = document.createElement("button");
+    del.className = "btn btn-ghost btn-small message-action";
+    del.type = "button";
+    del.textContent = "Delete";
+    del.setAttribute("aria-label", "Delete message");
+    del.addEventListener("click", () => {
+      currentHandlers.onDeleteMessage?.(messageId);
+      article.remove();
+      syncEmptyState();
+      scheduleScroll(true);
+    });
+
+    bar.append(copy, del);
+    article.appendChild(bar);
+  }
+
+  /**
+   * Collapsible exec output: `data-expanded` drives CSS, so toggling is a
+   * single attribute write (no layout rebuild). User toggles are sticky — the
+   * automatic running→completed collapse never fights a manual choice.
+   */
+  function execToggle(article: HTMLElement): HTMLButtonElement {
+    const toggle = document.createElement("button");
+    toggle.className = "exec-toggle";
+    toggle.type = "button";
+    toggle.addEventListener("click", () => {
+      article.dataset.userToggled = "true";
+      setExecExpanded(article, article.dataset.expanded === "false");
+    });
+    return toggle;
+  }
+
+  function setExecExpanded(article: HTMLElement, expanded: boolean): void {
+    article.dataset.expanded = expanded ? "true" : "false";
+    const toggle = article.querySelector<HTMLButtonElement>(".exec-toggle");
+    if (toggle) {
+      toggle.textContent = expanded ? "Hide details" : "Details";
+      toggle.setAttribute("aria-expanded", String(expanded));
     }
   }
 
@@ -359,7 +437,7 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       streamText = "";
     },
 
-    finishStreamingLine(finalText) {
+    finishStreamingLine(finalText, messageId) {
       // Release any text still held by the coalescer before deciding what to
       // keep, so the comparison below sees the fully painted state.
       coalescer.close();
@@ -379,10 +457,20 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
               body.textContent = finalText;
             }
           }
+          attachMessageActions(streamingLine, {
+            role: "agent",
+            text: finalText,
+            ...(messageId ? { messageId } : {}),
+          });
         }
       } else if (finalText.length > 0) {
         const { article } = buildBaseLine({ role: "agent", text: finalText });
         root.appendChild(article);
+        attachMessageActions(article, {
+          role: "agent",
+          text: finalText,
+          ...(messageId ? { messageId } : {}),
+        });
         scheduleScroll();
       }
       streamingLine = undefined;
@@ -452,11 +540,14 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
         name.className = "exec-name";
         const status = document.createElement("span");
         status.className = "exec-status";
-        head.append(icon, name, status);
+        const toggle = execToggle(article);
+        toggle.hidden = true;
+        head.append(icon, name, status, toggle);
         const detail = document.createElement("div");
         detail.className = "exec-detail";
         card.append(head, detail);
         article.append(card);
+        setExecExpanded(article, true);
         root.appendChild(article);
         itemByToolCallId.set(tool.toolCallId, article);
       }
@@ -473,8 +564,20 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       if (detail) {
         detail.textContent = tool.error ?? tool.detail ?? "";
         detail.hidden = detail.textContent.length === 0;
+        const toggle = article.querySelector<HTMLButtonElement>(".exec-toggle");
+        if (toggle) {
+          toggle.hidden = detail.textContent.length === 0;
+        }
       }
       article.dataset.status = tool.status;
+      if (article.dataset.userToggled !== "true") {
+        // Stay open while running and for short details (e.g. a file path);
+        // only substantial output settles into the compact completed state.
+        setExecExpanded(
+          article,
+          tool.status === "running" || (detail?.textContent.length ?? 0) <= COMMAND_COLLAPSE_THRESHOLD,
+        );
+      }
       syncEmptyState();
       scheduleScroll(pinned);
     },
@@ -504,10 +607,13 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
         name.className = "exec-name";
         const status = document.createElement("span");
         status.className = "exec-status";
-        head.append(icon, name, status);
+        const toggle = execToggle(article);
+        toggle.hidden = true;
+        head.append(icon, name, status, toggle);
         const output = document.createElement("pre");
         output.className = "exec-output";
         card.append(head, output);
+        setExecExpanded(article, true);
         article.append(card);
         root.appendChild(article);
         itemByToolCallId.set(key, article);
@@ -523,12 +629,22 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
         status.textContent = command.running ? "Running" : failed ? "Failed" : "✓ Completed";
         status.className = `exec-status is-${command.running ? "running" : failed ? "failed" : "completed"}`;
       }
+      let outputLength = 0;
       if (output) {
         const text = [command.stdout, command.stderr].filter((part) => typeof part === "string" && part.length > 0).join("\n");
         output.textContent = text;
         output.hidden = text.length === 0;
+        outputLength = text.length;
+        const toggle = article.querySelector<HTMLButtonElement>(".exec-toggle");
+        if (toggle) {
+          toggle.hidden = text.length === 0;
+        }
       }
       article.dataset.status = command.running ? "running" : failed ? "failed" : "completed";
+      if (article.dataset.userToggled !== "true") {
+        // Stay open while streaming; collapse long finished output only.
+        setExecExpanded(article, command.running === true || outputLength <= COMMAND_COLLAPSE_THRESHOLD);
+      }
       syncEmptyState();
       scheduleScroll(pinned);
     },
@@ -546,6 +662,10 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
         status.className = `exec-status is-${failed ? "failed" : "completed"}`;
       }
       article.dataset.status = failed ? "failed" : "completed";
+      if (article.dataset.userToggled !== "true") {
+        const text = article.querySelector<HTMLElement>(".exec-output")?.textContent ?? "";
+        setExecExpanded(article, text.length <= COMMAND_COLLAPSE_THRESHOLD);
+      }
     },
 
     upsertArtifact(change, reverted, handlers) {
@@ -680,6 +800,38 @@ function fileChangeActions(
 
   actions.append(view, accept, reject);
   return actions;
+}
+
+/** Finished command output longer than this collapses to a compact block. */
+const COMMAND_COLLAPSE_THRESHOLD = 400;
+
+/**
+ * Clipboard write with a legacy textarea fallback: some webview hosts deny
+ * the async clipboard API, and Copy must still work there.
+ */
+async function copyText(text: string): Promise<void> {
+  if (text.length === 0) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    // Fall through to the selection-based fallback.
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  document.body.appendChild(area);
+  area.select();
+  try {
+    document.execCommand("copy");
+  } catch {
+    // Nothing more we can do; the selection stays for a manual copy.
+  }
+  area.remove();
 }
 
 function permissionActions(
