@@ -24,7 +24,10 @@
   rework (in-place updates, rAF batching), optimistic new-conversation reset,
   **real SSE token streaming (OpenAI-compatible + OpenRouter), runtime
   auto-approve shield, composer model selector, artifact cards, redesigned
-  Settings IA (sidebar sections), Spider watermark empty state** (2026-09-27).
+  Settings IA (sidebar sections), Spider watermark empty state** (2026-09-27),
+  **chat-UI redesign: Copy/Delete message actions with stable transcript ids,
+  collapsible tool/command output, live command stdout/stderr streaming**
+  (2026-09-28).
 - **Identity note:** internal identifiers (`codeviaCursor`, `CodeviaSession`,
   storage keys `codeviaCursor.*`, package name `codevia-cursor`) intentionally
   keep the old name. Only user-facing strings say "Spider". Do NOT rename
@@ -111,6 +114,14 @@ Changing `RuntimeEvent`/`RuntimeSendRequest` shapes requires updating
 - event emitter → MessageRouter → GUI; usage accumulation per session
 - `listFileChanges`, `resolveFileChange`, `showFileChangeDiff`,
   `openFile` for the write-review flow
+- `deleteTranscriptEntry(sessionId, entryId)` (chat UI Delete → durable
+  removal) and live command-output coalescing (`pushCommandStream` → partial
+  `command_output` events every ~120ms, cleared by the final event)
+- agent mode is NOT user-selectable: every run uses `DEFAULT_AGENT_MODE`
+  (full registered tool set). See rule 21.
+- `recordTranscriptEvent` returns the event to publish, augmented with
+  `messageId` for assistant replies (ids are generated host-side so the GUI
+  and the persisted entry share one identity)
 
 ### Provider abstraction
 - `OpenAICompatibleRuntime` (`src/runtime/openaiCompatible/`): generic
@@ -168,6 +179,10 @@ shape; `ChatCompletion` is what `completeChat` returns.
   emitted, loop returns, no further model calls.
 - `prepareHistory` drops a trailing bare tool-call turn (retry) and
   `ensureSystemPrompt` refreshes the system prompt each run.
+- Assistant replies are stamped with a transcript entry id (`messageId` on
+  the `assistant_message` event) so the chat UI can Copy/Delete exactly the
+  persisted message. User prompts carry a GUI-generated id through
+  `SEND_PROMPT` → `startTask(..., messageId)` into the same transcript.
 - Streaming: `onStreamDelta` hook; Ollama gates streamed text through
   `createStreamGate` so partial tool JSON never reaches the UI. The
   OpenAI-compatible base and OpenRouter now stream for real: when a delta
@@ -391,6 +406,23 @@ Tool/command lifecycle rendered as exec boxes: `tool_requested → running →
 completed/failed`; commands show progressively updated output. Backend events
 are the source of truth for `phase`; the UI never infers state from text.
 
+### Message actions & collapsible output (2026-09-28)
+- **Stable message ids:** every assistant reply carries the transcript entry
+  id (from `AGENT_MESSAGE.messageId`); user prompts carry a GUI-generated id
+  echoed through `SEND_PROMPT`. `TRANSCRIPT` entries include `id`, so
+  restored messages stay actionable.
+- **Copy / Delete:** `messageList` attaches a `message-actions` bar to
+  user/assistant messages that have an id. It is CSS-hidden until hover or
+  keyboard focus (touch shows it always) and mutates in place — never a
+  rebuild. Copy uses `navigator.clipboard` with a textarea fallback. Delete
+  removes the row, drops the line from `AppState.messages`, and posts
+  `DELETE_MESSAGE` so the transcript entry is erased too.
+- **Collapsible exec output:** tool/command boxes toggle
+  `data-expanded` (one attribute write, CSS-driven show/hide). Running boxes
+  stay open; finished long command output collapses behind a `Details`
+  button. Manual toggles set `data-userToggled` so the automatic settle never
+  fights the user.
+
 ### Text streaming UX (2026-09-27)
 Full path: provider chunks (Ollama NDJSON / OpenAI-compatible + OpenRouter
 SSE) → stream gate → `onStreamDelta` → `text_delta` runtime event →
@@ -422,6 +454,11 @@ coalescer so stale deltas cannot leak into the next run.
   from the SAME provider state as Settings (no second catalog); changing the
   model posts the same SELECT_*_MODEL messages Settings uses. The shield
   toggles optimistically and syncs from the authoritative AUTO_APPROVE_STATE.
+- **Live command output:** `run_command` streams stdout/stderr through
+  `RuntimeToolExecutorContext.onOutput` → `commandRunner.onOutput` →
+  RuntimeManager partial `command_output` events (coalesced ~120ms). The
+  agent loop's final `command_output` event keeps the authoritative exit
+  code and clears the buffer.
 
 ### Settings information architecture (2026-09-27)
 `views/settingsView.ts` renders a two-column layout: fixed-width sticky
@@ -448,7 +485,10 @@ compress content). Section state: `AppState.settingsSection`.
 - Persistence: `src/session/sessionStore.ts` (Memento keys
   `codeviaCursor.sessions`, `codeviaCursor.activeSession`) +
   `src/session/transcriptStore.ts` (one append-only JSONL per session in
-  extension global storage; torn tails discarded on read).
+  extension global storage; torn tails discarded on read). Entries may carry
+  an `id` (stable message identity); `removeEntry(sessionId, entryId)`
+  rewrites the JSONL without that entry, serialized behind the append queue
+  (chat UI Delete must be durable, not just a UI removal).
 - **Transcripts are display-only:** restoring history never re-sends it to
   the model (zero tokens). The in-runtime model history
   (`histories: Map<sessionId, ChatTurn[]>` in each inference runtime) is
@@ -504,6 +544,26 @@ compress content). Section state: `AppState.settingsSection`.
 - Streaming UX coalescing → `gui/streamCoalescer.test.ts` (cadence batching,
   immediate first paint, idle rescheduling, single final flush, cancellation),
   using a fake scheduler — no real timers in tests.
+- Message actions → `runtime/runtimeManager.messageActions.test.ts`
+  (assistant id stamping, user id from composer, durable delete, plus the
+  guard that every run uses agent mode and the default tool set contains every
+  registered tool) and `webview/messageRouter.messageActions.test.ts`
+  (DELETE_MESSAGE validation; SET_AGENT_MODE is rejected as an unknown
+  message). Persistence → `session/transcriptStore.removeEntry.test.ts`
+  (targeted removal, no resurrection after restart, no-op guards).
+- Agent tool flow (the regression guard) →
+  `runtime/openrouter/openRouterToolFlow.test.ts` (streamed native `write_file`
+  executes with its provider id preserved; the write_file/read_file/edit_file
+  schemas are sent; pins that a mode excluding a registry-known tool produces
+  the "Unknown tool" message) and
+  `runtime/openrouter/openRouterAgentFlow.integration.test.ts` (the exact
+  reported request creates a real file through the real ToolRouter +
+  WorkspaceToolExecutor, plus multi-step read_file → edit_file → finish and
+  assistant `tool_calls[].id` == `tool_call_id` integrity).
+- Live command output → `runtime/tools/commandRunner.output.test.ts`
+  (chunk hook + unchanged non-streaming result) and
+  `runtime/runtimeManager.commandStream.test.ts` (partial events while a
+  command runs).
 - **What to test when touching a subsystem:**
   - agent loop → `inferenceAgentLoop.test.ts` + `thinkingSafety` +
     `invalidToolRecovery` (add tool-id lifecycle cases there or in
@@ -548,10 +608,36 @@ compress content). Section state: `AppState.settingsSection`.
     in the GUI.
 17. User-facing chat UI never says "Session" for a conversation (internal ids
     keep the name).
+18. Message Delete must be durable: removing a message always erases its
+    transcript entry (id-based `removeEntry`), never just the DOM row.
+19. Assistant replies and user prompts must keep one stable id across the UI
+    and the persisted transcript; never regenerate ids when restoring.
+20. Command output is streamed but coalesced host-side (~120ms); partial
+    `command_output` events are never written to the transcript — only the
+    final event is.
+21. Agent mode is an INTERNAL runtime concern. Never expose it as a user
+    choice and never let a UI control restrict the tool set: a registered tool
+    outside the current available set is reported to the model as an unknown
+    tool, which silently breaks autonomous tool use (real regression,
+    2026-09-28). Every shipped run uses `DEFAULT_AGENT_MODE`.
+22. The model chooses tools from the registered schemas it is sent. Never
+    require the user to pick a tool or a mode; the agent loop, not the UI,
+    decides what set the model may choose from.
 
 ## 15. Known Bugs / Limitations
 
 ### Fixed
+- **Registered tools reported as "Unknown tool" (autonomous tool use broken):**
+  a composer Code/Ask/Plan selector made `DEFAULT_AGENT_MODE`
+  user-controllable, so a read-only selection removed `write_file`,
+  `edit_file`, `run_command` etc. from `availableToolNames(mode)` and the
+  agent loop told the model `Unknown tool "write_file". Choosing from the
+  available tools…` — the model then could not create a file even though the
+  user never asked it to choose a tool. Fixed by reverting the selector and
+  the `SET_AGENT_MODE` protocol entirely; `RuntimeManager.startTask` again
+  hardcodes `DEFAULT_AGENT_MODE`. Regression tests in
+  `openRouterToolFlow.test.ts` + `openRouterAgentFlow.integration.test.ts`
+  (2026-09-28).
 - **OpenAI-compatible tool history (OpenRouter 400
   `tool messages must include a non-empty string tool_call_id`):** tool
   results were serialized without `tool_call_id` and the parser dropped
@@ -627,6 +713,20 @@ compress content). Section state: `AppState.settingsSection`.
   `parseNativeToolCalls` exactly like non-streamed output, and delta text
   passes through the same stream gate as Ollama, so no second safety path
   exists.
+- **Stable message identity lives in the transcript (2026-09-28)** — ids are
+  minted host-side (assistant) or supplied by the GUI and echoed back (user),
+  so Copy/Delete target exactly one persisted entry and History restore keeps
+  working. The alternative (GUI-only ids) would leave deletion unable to
+  reach persistence.
+- **Command output is coalesced at the host, not the UI (2026-09-28)** — a
+  chatty build would otherwise flood the webview with IPC messages. The final
+  `command_output` event stays authoritative so coalescing can never lose the
+  exit code or truncate the result.
+- **Agent mode stays an internal constant (2026-09-28)** — a composer
+  Code/Ask selector was tried and reverted: making `DEFAULT_AGENT_MODE`
+  user-controllable let a read-only selection filter `write_file`/`edit_file`
+  out of the available set, and the loop then told the model those tools were
+  unknown. Tool availability must never be reachable from the UI.
 - **Secrets stay in SecretStorage; config persistence holds no credentials** —
   restore re-attaches the OpenRouter key at activation.
 
@@ -650,8 +750,15 @@ compress content). Section state: `AppState.settingsSection`.
   (Models / Agent Behaviour / Auto Approve / Indexing / About Spider);
   `AUTO_APPROVE_STATE` / `PERMISSION_RULES` / `EXTENSION_INFO` protocol
   messages; session-terminology sweep in chat UI.
+- **Completed (2026-09-28, chat UI redesign):** Copy/Delete message actions
+  with stable ids (composer-generated user ids, host-generated assistant ids)
+  and durable transcript deletion; collapsible tool/command output; composer
+  live command stdout/stderr streaming (coalesced host-side); new tests for
+  all of the above. A composer agent-mode selector was added and then reverted
+  (see §15 Fixed) because it gated registered tools out of the model's
+  available set.
 - **Current:** documentation/context (this file). All checks green:
-  typecheck, lint (0 warnings), 302 unit tests, compile.
+  typecheck, lint (0 warnings), 332 unit tests, compile.
 - **Next planned:** per-conversation titles; collapsible exec boxes;
   workspace indexing (reserved Settings section exists, honestly marked);
   agent behaviour settings if/when the backend supports them.

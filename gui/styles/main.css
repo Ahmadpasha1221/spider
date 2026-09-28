@@ -118,6 +118,14 @@ input:focus, select:focus, textarea:focus {
   font-family: var(--vscode-editor-font-family, monospace); font-size: 12px;
   white-space: pre-wrap; word-break: break-word;
 }
+/* Collapsible exec output: one attribute flip drives visibility, no rebuild. */
+.exec-toggle {
+  flex-shrink: 0; padding: 1px 6px; font-size: 10px; cursor: pointer;
+  background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 0;
+}
+.exec-toggle:hover { color: var(--accent-soft); border-color: var(--accent); }
+.exec-box[data-expanded="false"] .exec-detail,
+.exec-box[data-expanded="false"] .exec-output { display: none; }
 @keyframes exec-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
 @keyframes block-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
 @keyframes exec-pulse { 50% { opacity: .55; } }
@@ -151,6 +159,7 @@ input:focus, select:focus, textarea:focus {
 }
 @media (prefers-reduced-motion: reduce) {
   .exec-card { animation: none; }
+  .message-actions { transition: none; }
   .exec-status.is-running { animation: none; }
   .message-thinking-block, .artifact-card { animation: none; }
   .message-thinking-block[data-state="active"] .thinking-icon { animation: none; }
@@ -195,6 +204,20 @@ input:focus, select:focus, textarea:focus {
 .permission-actions { display: flex; gap: 6px; margin-top: 8px; }
 .file-change-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
 .permission-resolved { display: inline-block; margin-top: 8px; color: var(--muted); font-size: 11px; }
+/* Message actions (Copy / Delete): hidden until hover or keyboard focus so the
+   transcript stays clean, always reachable through focus for accessibility. */
+.message-actions {
+  display: flex; gap: 6px; margin-top: 6px;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.message:hover .message-actions,
+.message:focus-within .message-actions,
+.message-actions:focus-within { opacity: 1; }
+@media (hover: none) {
+  /* Touch: no hover state, so keep the actions visible. */
+  .message-actions { opacity: 1; }
+}
+
 .message-agent.streaming-line { border-left-color: var(--accent-soft); }
 .message-agent.streaming-line::after { content: "▋"; color: var(--accent-soft); animation: blink 1s steps(2, start) infinite; }
 @keyframes blink { to { visibility: hidden; } }
