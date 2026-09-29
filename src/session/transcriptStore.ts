@@ -87,6 +87,18 @@ export class TranscriptStore {
     return entries;
   }
 
+  /**
+   * Waits for every queued write for this session to land. Callers that need
+   * durability (end of a run, before reporting completion) use this so a
+   * transcript read can never observe a half-persisted run.
+   */
+  async flush(sessionId: string): Promise<void> {
+    if (!isValidSessionId(sessionId)) {
+      return;
+    }
+    await this.queues.get(sessionId);
+  }
+
   async delete(sessionId: string): Promise<void> {
     if (!isValidSessionId(sessionId)) {
       return;

@@ -288,6 +288,8 @@ export type RuntimeProviderConfig =
 
 export interface ResolvedRuntimeConfig {
   readonly provider: RuntimeProvider;
+  /** Active provider profile id; locates the profile's stored credential. */
+  readonly profileId?: string;
   readonly modelId?: string;
   readonly baseUrl?: string;
   readonly apiKey?: string;

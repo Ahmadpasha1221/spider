@@ -11,7 +11,11 @@ import type {
   SessionListItem,
 } from "./protocol";
 
-export type AppView = "chat" | "history" | "settings";
+/**
+ * The chat UI no longer exposes conversation-history navigation (persistence
+ * stays in SessionStore/TranscriptStore; only the UI surface was removed).
+ */
+export type AppView = "chat" | "settings";
 /** Sections inside the redesigned Settings page. */
 export type SettingsSection = "models" | "behaviour" | "autoApprove" | "indexing" | "about";
 

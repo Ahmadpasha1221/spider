@@ -3,6 +3,13 @@
  * state change destroyed the Send button between mousedown and mouseup (eating
  * clicks) and wiped text while the user typed.
  *
+ * Layout: a structural `composer-input` wrapper holds the textarea and the
+ * action row (Cancel / Try Again / Send). The actions are absolutely
+ * positioned inside that wrapper, so Send stays visually anchored to the
+ * input area and keeps its position at any textarea height — no negative
+ * margins, no offsets that break when the user resizes. Enter sends,
+ * Shift+Enter inserts a newline (unchanged).
+ *
  * The bottom toolbar hosts the fast-path controls: the active-model selector
  * (per-provider catalog, same underlying state as Settings) and the shield
  * toggle for the temporary runtime auto-approve (backend authoritative).
@@ -42,6 +49,13 @@ export function createComposer(
 ): ComposerHandle {
   root.replaceChildren();
   root.classList.add("composer-v2");
+
+  // The input wrapper exists so the action row is anchored to the input area
+  // structurally (relative parent + absolute actions) instead of relying on
+  // negative margins or fragile offsets. The textarea reserves the room with
+  // bottom padding, so the buttons never cover the text.
+  const input = document.createElement("div");
+  input.className = "composer-input";
 
   const textarea = document.createElement("textarea");
   textarea.rows = 3;
@@ -105,7 +119,8 @@ export function createComposer(
   });
 
   toolbar.append(modelWrap, shield);
-  root.append(textarea, actions, toolbar);
+  input.append(textarea, actions);
+  root.append(input, toolbar);
 
   let current = {
     disabled: false,

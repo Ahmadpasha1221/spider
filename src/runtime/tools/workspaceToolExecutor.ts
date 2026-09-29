@@ -3,19 +3,53 @@ import * as path from "node:path";
 import type { RuntimeToolCall, RuntimeToolExecutor, RuntimeToolExecutorContext } from "../runtimeTypes";
 import { runWorkspaceCommand } from "./commandRunner";
 import { isLocalToolName, type LocalToolName } from "./toolRegistry";
-import { pathExists, resolveWorkspacePath } from "./workspacePath";
+import { pathExists, resolveWorkspacePathSafe, toWorkspaceRelativePath } from "./workspacePath";
+import { readMultipleFiles, readWorkspaceTextFile } from "./filesystemTools";
+import { globSearch, grepSearch } from "./searchTools";
+import { getDiagnostics } from "./diagnosticsTool";
+import { createGitCommandRunner, gitStatus, type GitCommandRunner } from "./gitStatusTool";
+import { gitDiff } from "./gitDiffTool";
+import { gitLog } from "./gitLogTool";
+import type { EditorContextSource } from "../editor/editorContextSource";
+import { getActiveFile, getSelection } from "./editorTools";
+import { BackgroundProcessManager } from "./backgroundProcessManager";
+import type { DiagnosticsSource } from "../diagnostics/diagnosticsSource";
+import { ToolExecutionError } from "./toolError";
+import { isProbablyBinary, SEARCH_LIMITS, walkWorkspace } from "./workspaceSearch";
 
-const SEARCH_SKIP = new Set([".git", "node_modules", "dist", "out", ".vscode"]);
 const MAX_SEARCH_MATCHES = 50;
 const MAX_LIST_ENTRIES = 200;
 
+export interface WorkspaceToolExecutorOptions {
+  /** VS Code diagnostics (absent outside the extension host). */
+  readonly diagnostics?: DiagnosticsSource;
+  /** Overridable git runner (tests, alternative hosts). */
+  readonly git?: GitCommandRunner;
+  /** Editor context (absent outside the VS Code extension host). */
+  readonly editor?: EditorContextSource;
+  /** Overridable background-process manager (tests, alternative hosts). */
+  readonly backgroundProcesses?: BackgroundProcessManager;
+}
+
 export class WorkspaceToolExecutor implements RuntimeToolExecutor {
+  private readonly diagnostics?: DiagnosticsSource;
+  private readonly git: GitCommandRunner;
+  private readonly editor?: EditorContextSource;
+  private readonly backgroundProcesses: BackgroundProcessManager;
+
+  constructor(options: WorkspaceToolExecutorOptions = {}) {
+    this.diagnostics = options.diagnostics;
+    this.git = options.git ?? createGitCommandRunner();
+    this.editor = options.editor;
+    this.backgroundProcesses = options.backgroundProcesses ?? new BackgroundProcessManager();
+  }
+
   async execute(call: RuntimeToolCall, context: RuntimeToolExecutorContext): Promise<unknown> {
     if (context.signal?.aborted && call.name !== "run_command") {
-      throw new Error("Tool execution cancelled.");
+      throw new ToolExecutionError("cancelled", "Tool execution cancelled.");
     }
     if (!isLocalToolName(call.name)) {
-      throw new Error(`Unknown tool: ${call.name}`);
+      throw new ToolExecutionError("invalid_input", `Unknown tool: ${call.name}`);
     }
     const input = isRecord(call.input) ? call.input : {};
     return this.dispatch(call.name, input, context);
@@ -30,10 +64,42 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     switch (name) {
       case "list_files":
         return this.listFiles(workspacePath, stringField(input, "path") ?? ".");
-      case "read_file":
-        return this.readFile(workspacePath, requiredString(input, "path"));
+      case "read_file": {
+        // Shared reader: one validation/binary/size path for every read tool.
+        const file = await readWorkspaceTextFile(workspacePath, requiredString(input, "path"), {
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+        return { path: file.path, content: file.content };
+      }
+      case "read_multiple_files":
+        return readMultipleFiles(input, {
+          workspacePath,
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
       case "search_files":
-        return this.searchFiles(workspacePath, requiredString(input, "query"), stringField(input, "path") ?? ".");
+        return this.searchFiles(workspacePath, requiredString(input, "query"), stringField(input, "path") ?? ".", context.signal);
+      case "grep_search":
+        return grepSearch(input, {
+          workspacePath,
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+      case "glob_search":
+        return globSearch(input, {
+          workspacePath,
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+      case "get_diagnostics":
+        return getDiagnostics(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          { ...(this.diagnostics ? { diagnostics: this.diagnostics } : {}) },
+        );
+      case "git_status":
+        return gitStatus(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          this.git,
+        );
       case "write_file":
         return this.writeFile(workspacePath, requiredString(input, "path"), requiredString(input, "content"));
       case "edit_file":
@@ -62,13 +128,31 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
           context.signal,
           context.onOutput,
         );
+      case "git_diff":
+        return gitDiff(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          this.git,
+        );
+      case "git_log":
+        return gitLog(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          this.git,
+        );
+      case "get_active_file":
+        return getActiveFile(input, { editor: this.editor });
+      case "get_selection":
+        return getSelection(input, { editor: this.editor });
+      case "background_command":
+        return this.startBackgroundCommand(workspacePath, input, context.signal);
       default:
-        throw new Error(`Unknown tool: ${name}`);
+        throw new ToolExecutionError("invalid_input", `Unknown tool: ${name}`);
     }
   }
 
   private async listFiles(workspacePath: string, requested: string): Promise<unknown> {
-    const target = resolveWorkspacePath(workspacePath, requested);
+    const target = await resolveWorkspacePathSafe(workspacePath, requested);
     const entries = await fs.readdir(target, { withFileTypes: true });
     return {
       path: requested,
@@ -79,25 +163,35 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     };
   }
 
-  private async readFile(workspacePath: string, requested: string): Promise<unknown> {
-    const target = resolveWorkspacePath(workspacePath, requested);
-    const content = await fs.readFile(target, "utf8");
-    return { path: requested, content };
-  }
-
-  private async searchFiles(workspacePath: string, query: string, requested: string): Promise<unknown> {
-    const root = resolveWorkspacePath(workspacePath, requested);
+  /**
+   * Name + content search preserved for backward compatibility. It runs on the
+   * shared walker (same ignore rules, same binary handling) so it cannot drift
+   * from grep_search; grep_search is the precise tool for content queries.
+   */
+  private async searchFiles(
+    workspacePath: string,
+    query: string,
+    requested: string,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const root = await resolveWorkspacePathSafe(workspacePath, requested);
     const matches: Array<{ path: string; line: number; text: string }> = [];
-    await walk(root, workspacePath, async (filePath, relative) => {
+    let truncatedByScan = false;
+
+    const walk = await walkWorkspace(root, async (entry) => {
       if (matches.length >= MAX_SEARCH_MATCHES) {
         return false;
       }
+      const relative = entry.relativePath;
       if (relative.toLowerCase().includes(query.toLowerCase())) {
         matches.push({ path: relative, line: 0, text: relative });
       }
       try {
-        const content = await fs.readFile(filePath, "utf8");
-        const lines = content.split(/\r?\n/);
+        const buffer = await fs.readFile(entry.absolutePath);
+        if (isProbablyBinary(buffer)) {
+          return true;
+        }
+        const lines = buffer.toString("utf8").split(/\r?\n/);
         for (let index = 0; index < lines.length; index += 1) {
           if (lines[index]?.includes(query)) {
             matches.push({ path: relative, line: index + 1, text: lines[index] ?? "" });
@@ -110,45 +204,62 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
         return true;
       }
       return matches.length < MAX_SEARCH_MATCHES;
+    }, {
+      ...(signal ? { signal } : {}),
+      maxEntries: SEARCH_LIMITS.globMaxScannedEntries,
+      // Preserved from the legacy implementation: results are always
+      // workspace-relative, even when the search is narrowed to a subfolder.
+      relativeTo: workspacePath,
     });
-    return { query, matches };
+
+    if (walk.truncated) {
+      truncatedByScan = true;
+    }
+
+    // The legacy result shape is preserved; truncation is reported additively.
+    return {
+      query,
+      matches,
+      ...(walk.cancelled ? { cancelled: true } : {}),
+      ...(truncatedByScan ? { truncated: true, reason: "max_scanned_files" } : {}),
+    };
   }
 
   private async writeFile(workspacePath: string, requested: string, content: string): Promise<unknown> {
-    const target = resolveWorkspacePath(workspacePath, requested);
+    const target = await resolveWorkspacePathSafe(workspacePath, requested);
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, content, "utf8");
     return { path: requested, written: true, bytes: Buffer.byteLength(content, "utf8") };
   }
 
   private async editFile(workspacePath: string, requested: string, oldString: string, newString: string): Promise<unknown> {
-    const target = resolveWorkspacePath(workspacePath, requested);
+    const target = await resolveWorkspacePathSafe(workspacePath, requested);
     const content = await fs.readFile(target, "utf8");
     if (!content.includes(oldString)) {
-      throw new Error(`old_string was not found in ${requested}`);
+      throw new ToolExecutionError("invalid_input", `old_string was not found in ${requested}`);
     }
     await fs.writeFile(target, content.replace(oldString, newString), "utf8");
     return { path: requested, edited: true };
   }
 
   private async createDirectory(workspacePath: string, requested: string): Promise<unknown> {
-    const target = resolveWorkspacePath(workspacePath, requested);
+    const target = await resolveWorkspacePathSafe(workspacePath, requested);
     await fs.mkdir(target, { recursive: true });
     return { path: requested, created: true };
   }
 
   private async moveFile(workspacePath: string, from: string, to: string): Promise<unknown> {
-    const source = resolveWorkspacePath(workspacePath, from);
-    const destination = resolveWorkspacePath(workspacePath, to);
+    const source = await resolveWorkspacePathSafe(workspacePath, from);
+    const destination = await resolveWorkspacePathSafe(workspacePath, to);
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.rename(source, destination);
     return { from, to, moved: true };
   }
 
   private async deleteFile(workspacePath: string, requested: string): Promise<unknown> {
-    const target = resolveWorkspacePath(workspacePath, requested);
+    const target = await resolveWorkspacePathSafe(workspacePath, requested);
     if (!(await pathExists(target))) {
-      throw new Error(`Path does not exist: ${requested}`);
+      throw new ToolExecutionError("not_found", `Path does not exist: ${requested}`);
     }
     const stat = await fs.stat(target);
     if (stat.isDirectory()) {
@@ -167,7 +278,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     signal?: AbortSignal,
     onOutput?: (stream: "stdout" | "stderr", chunk: string) => void,
   ): Promise<unknown> {
-    const workingDirectory = resolveWorkspacePath(workspacePath, cwd && cwd.length > 0 ? cwd : ".");
+    const workingDirectory = await resolveWorkspacePathSafe(workspacePath, cwd && cwd.length > 0 ? cwd : ".");
     return runWorkspaceCommand({
       command,
       cwd: workingDirectory,
@@ -176,25 +287,70 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       ...(onOutput ? { onOutput } : {}),
     });
   }
-}
 
-async function walk(
-  current: string,
-  workspacePath: string,
-  visit: (filePath: string, relative: string) => Promise<boolean>,
-): Promise<void> {
-  const entries = await fs.readdir(current, { withFileTypes: true });
-  for (const entry of entries) {
-    if (SEARCH_SKIP.has(entry.name)) {
-      continue;
+  /**
+   * Starts a long-running process and returns immediately. The command and its
+   * arguments are passed as an argv array to `spawn(command, args, {
+   * shell: false })`, so no model-supplied text is ever interpreted by a shell.
+   * The process lifetime is independent of the tool request: cancelling the agent
+   * stops waiting for startup, it does not kill a process that has already started.
+   */
+  private async startBackgroundCommand(
+    workspacePath: string,
+    input: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const command = requiredString(input, "command");
+    const argsPopped = stringArrayField(input, "args");
+    const requestedCwd = stringField(input, "cwd");
+    const startupTimeoutMs = numberField(input, "startupTimeoutMs");
+
+    if (command.startsWith("-")) {
+      throw new ToolExecutionError("invalid_input", "command must not start with '-'.");
     }
-    const full = path.join(current, entry.name);
-    const relative = path.relative(workspacePath, full).replaceAll("\\", "/");
-    if (entry.isDirectory()) {
-      await walk(full, workspacePath, visit);
-    } else if (!(await visit(full, relative))) {
-      return;
+    if (argsPopped.some((arg) => arg && arg.startsWith("-") && arg.length > 1)) {
+      throw new ToolExecutionError(
+        "invalid_input",
+        "args must not start with '-' (to avoid option confusion, pass explicit helper args).",
+      );
     }
+
+    const cwd = await resolveWorkspacePathSafe(workspacePath, requestedCwd && requestedCwd.length > 0 ? requestedCwd : ".");
+
+    if (signal?.aborted) {
+      return {
+        processId: "",
+        command,
+        args: argsPopped,
+        cwd: toWorkspaceRelativePath(workspacePath, cwd),
+        status: "cancelled",
+        message: "Process start was cancelled.",
+      };
+    }
+
+    const started = await this.backgroundProcesses.start({
+      command,
+      ...(argsPopped.length ? { args: argsPopped as readonly string[] } : {}),
+      cwd,
+      ...(startupTimeoutMs !== undefined ? { startupTimeoutMs } : {}),
+      ...(signal ? { signal } : {}),
+    });
+
+    return {
+      processId: started.processId,
+      command: started.command,
+      args: started.args,
+      cwd: toWorkspaceRelativePath(workspacePath, started.cwd),
+      status: started.status,
+      ...(started.pid !== undefined ? { pid: started.pid } : {}),
+      ...(started.exitCode !== undefined ? { exitCode: started.exitCode } : {}),
+      ...(started.error ? { error: started.error } : {}),
+      ...(started.stdout !== undefined ? { stdout: started.stdout } : {}),
+      ...(started.stderr !== undefined ? { stderr: started.stderr } : {}),
+      ...(started.outputTruncated ? { outputTruncated: true as const } : {}),
+      ...(started.cancelled ? { cancelled: true as const, message: started.message } : {}),
+      ...(started.message ? { message: started.message } : {}),
+    };
   }
 }
 
@@ -215,7 +371,7 @@ function numberField(input: Record<string, unknown>, key: string): number | unde
 function requiredString(input: Record<string, unknown>, key: string): string {
   const value = stringField(input, key);
   if (!value) {
-    throw new Error(`Missing required argument: ${key}`);
+    throw new ToolExecutionError("invalid_input", `Missing required argument: ${key}`);
   }
   return value;
 }
@@ -227,5 +383,13 @@ function firstString(input: Record<string, unknown>, keys: readonly string[]): s
       return value;
     }
   }
-  throw new Error(`Missing required argument: ${keys.join(" or ")}`);
+  throw new ToolExecutionError("invalid_input", `Missing required argument: ${keys.join(" or ")}`);
+}
+
+function stringArrayField(input: Record<string, unknown>, key: string): readonly string[] {
+  const value = input[key];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === "string");
 }

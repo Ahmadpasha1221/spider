@@ -50,25 +50,9 @@ input:focus, select:focus, textarea:focus {
 .setup-banner span { color: var(--muted); line-height: 1.4; }
 .setup-banner .btn { align-self: flex-start; margin-top: 3px; }
 
+/* Conversation bar: New-conversation only (history navigation lives nowhere in
+   the chat UI; sessions are still persisted by the host). */
 .session-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.session-label { color: var(--muted); font-size: 11px; white-space: nowrap; }
-.session-bar select { flex: 1; min-width: 0; }
-
-/* History page: one row per previous conversation. */
-.history-list { display: flex; flex-direction: column; gap: 8px; }
-.history-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-.history-item { margin: 0; }
-.history-open {
-  display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
-  background: var(--card-bg); color: var(--fg); border: 1px solid var(--border);
-  border-radius: 0; padding: 9px 10px; cursor: pointer;
-}
-.history-open:hover:not(:disabled) { border-color: var(--accent); }
-.history-open.is-active { border-color: var(--accent); }
-.history-open:disabled { opacity: .5; cursor: not-allowed; }
-.history-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.history-meta { color: var(--muted); font-size: 11px; }
-.history-new { align-self: flex-start; margin-top: 4px; }
 
 .message-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px; }
 .empty-chat { height: 100%; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; text-align: center; color: var(--muted); }
@@ -169,9 +153,30 @@ input:focus, select:focus, textarea:focus {
 
 .composer { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); padding: 7px; background: var(--input-bg); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.composer textarea { width: 100%; min-height: 62px; max-height: 180px; resize: vertical; padding: 5px; border: 1px solid transparent; outline: none; background: transparent; color: var(--input-fg); }
-.composer textarea:focus { border-color: transparent; box-shadow: none; }
-.composer-actions { display: flex; gap: 6px; justify-content: flex-end; }
+/* Composer input: the textarea and its actions share one wrapper so the
+   buttons stay visually anchored to the input area and keep their position
+   when the textarea is resized (absolute inside a relative box — no negative
+   margins, no magic offsets). */
+.composer-input { position: relative; display: block; }
+.composer-input textarea {
+  width: 100%; min-height: 76px; max-height: 1000px; resize: vertical;
+  /* Bottom padding reserves the action row so text never runs under it. */
+  padding: 5px 5px 34px; border: 1px solid transparent; outline: none;
+  background: transparent; color: var(--input-fg);
+}
+.composer-input textarea:focus { border-color: transparent; box-shadow: none; }
+.composer-actions {
+  position: absolute; right: 4px; bottom: 4px;
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  flex-wrap: nowrap; max-width: calc(100% - 8px);
+}
+
+/* Narrow VS Code sidebars: let the action row wrap onto a second line and
+   reserve the matching vertical space in the textarea. */
+@media (max-width: 340px) {
+  .composer-input textarea { padding-bottom: 62px; }
+  .composer-actions { flex-wrap: wrap; }
+}
 
 /* Composer toolbar: model picker + shield, the fast-path controls. */
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
@@ -288,7 +293,7 @@ h2 { font-size: 13px; margin-bottom: 4px; }
 
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field label { font-size: 11px; color: var(--muted); }
-.field input, .field select, .select-control, .session-bar select { width: 100%; padding: 7px 8px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--border); border-radius: 0; }
+.field input, .field select, .select-control { width: 100%; padding: 7px 8px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--border); border-radius: 0; }
 .form-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 @media (max-width: 360px) {

@@ -26,8 +26,22 @@ describe("tool availability (current available-tool set)", () => {
       "move_file",
       "delete_file",
       "run_command",
+      "read_multiple_files",
+      "grep_search",
+      "glob_search",
+      "get_diagnostics",
+      "git_status",
       "finish",
     ]);
+  });
+
+  it("includes the read-only Phase 1 tools in read-only modes", () => {
+    for (const mode of ["ask", "plan"] as const) {
+      const tools = availableToolNames(mode);
+      for (const name of ["read_multiple_files", "grep_search", "glob_search", "get_diagnostics", "git_status"]) {
+        expect(tools).toContain(name);
+      }
+    }
   });
 
   it("restricts ask and plan modes to read/search tools plus finish", () => {
@@ -42,6 +56,8 @@ describe("tool availability (current available-tool set)", () => {
       expect(tools).not.toContain("edit_file");
       expect(tools).not.toContain("delete_file");
       expect(tools).not.toContain("run_command");
+      expect(tools).not.toContain("create_directory");
+      expect(tools).not.toContain("move_file");
     }
   });
 

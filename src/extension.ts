@@ -3,11 +3,12 @@ import { COMMANDS, EXTENSION_NAME, OPENROUTER_API_KEY_SECRET_KEY } from "./share
 import { Logger } from "./utils/logger";
 import { CursorAuthProvider } from "./auth/cursorAuthProvider";
 import { VSCodeSecretStorageAdapter } from "./auth/secretStorage";
+import { createProviderCredentialStore } from "./auth/providerCredentials";
 import { CursorClient } from "./auth/cursorClient";
 import { CursorConnectionService } from "./auth/cursorConnection";
 import { AgentManager } from "./agent/agentManager";
 import { SessionStore } from "./session/sessionStore";
-import { ProviderConfigStore } from "./session/providerConfigStore";
+import { ProviderConfigStore, profileIdFor } from "./session/providerConfigStore";
 import { TranscriptStore } from "./session/transcriptStore";
 import { MessageRouter } from "./webview/messageRouter";
 import { AgentViewProvider } from "./webview/agentViewProvider";
@@ -19,6 +20,9 @@ import { OllamaRuntime } from "./runtime/ollama/ollamaRuntime";
 import { OpenAICompatibleRuntime } from "./runtime/openaiCompatible/openaiCompatibleRuntime";
 import { OpenRouterRuntime } from "./runtime/openrouter/openRouterRuntime";
 import { WorkspaceToolExecutor } from "./runtime/tools/workspaceToolExecutor";
+import { createVSCodeDiagnosticsSource } from "./runtime/diagnostics/diagnosticsSource";
+import { createVSCodeEditorContextSource } from "./runtime/editor/editorContextSource";
+import { BackgroundProcessManager } from "./runtime/tools/backgroundProcessManager";
 import { DiffViewService } from "./runtime/review/diffView";
 
 const logger = new Logger(EXTENSION_NAME, "INFO");
@@ -59,6 +63,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   );
 
+  // Provider profiles hold non-secret configuration; the matching credential
+  // for each profile lives in SecretStorage under a key derived from its id.
+  // The legacy single OpenRouter key is the migration source for the default
+  // OpenRouter profile.
+  const providerCredentials = createProviderCredentialStore(secretStorage, {
+    legacySecretKeys: { [profileIdFor("openrouter")]: OPENROUTER_API_KEY_SECRET_KEY },
+  });
+
   const sessionStore = new SessionStore(context.workspaceState);
   const providerConfigStore = new ProviderConfigStore(context.workspaceState);
   const transcriptStore = new TranscriptStore(context.globalStorageUri);
@@ -69,7 +81,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     permissionManager,
     runtimes: [new OllamaRuntime(), new OpenAICompatibleRuntime(), new OpenRouterRuntime(), new MockRuntime()],
     logger,
-    toolExecutor: new WorkspaceToolExecutor(),
+    // get_diagnostics reads the editor's current diagnostics; everything else
+    // in the executor is host-independent.
+    toolExecutor: new WorkspaceToolExecutor({ diagnostics: createVSCodeDiagnosticsSource() }),
     defaultWorkspacePath: getWorkspacePath(),
     transcriptStore,
     diffView,
@@ -114,23 +128,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   await agentManager.restoreSessions();
   await runtimeManager.restoreSessions();
 
-  // Restore the previously saved provider/model so the user is not asked to
-  // configure the provider again. Secrets are never persisted: the OpenRouter
-  // key is re-attached from VS Code SecretStorage when present.
-  const savedProviderConfig = await runtimeManager.restoreProviderConfig();
-  if (savedProviderConfig?.provider === "openrouter") {
-    const apiKey = await secretStorage.get(OPENROUTER_API_KEY_SECRET_KEY);
-    if (apiKey) {
-      await runtimeManager.setProvider({
-        provider: "openrouter",
-        apiKey,
-        ...(savedProviderConfig.modelId ? { modelId: savedProviderConfig.modelId } : {}),
-      });
+  // Hydrate the previously selected provider profile so the user is not asked
+  // to configure the provider again. Non-secret configuration is restored from
+  // the profile store; the credential is resolved from SecretStorage by profile
+  // id — the host owns credentials, the webview only ever sees sanitized state.
+  const restoredProvider = await runtimeManager.restoreProviderConfig();
+  if (restoredProvider && !restoredProvider.applied) {
+    const { config } = restoredProvider;
+    const credential = await providerCredentials.get(config.profileId ?? profileIdFor(config.provider));
+    if (credential) {
+      await runtimeManager.completeRestore(config, credential);
       if (runtimeManager.listSessions().length === 0) {
         runtimeManager.createSession(getWorkspacePath());
       }
     } else {
-      logger.info("Saved OpenRouter provider found without a stored API key", { operation: "activate" });
+      logger.info("Saved provider profile has no stored credential; skipping restore", { operation: "activate" });
     }
   }
 

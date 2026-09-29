@@ -1,9 +1,7 @@
 import { onHostMessage, postToHost } from "./bridge";
-import { createStreamCoalescer } from "./streamCoalescer";
 import type { HostToGui, RuntimeProvider, SessionListItem, PermissionRule, PermissionRuleCategory } from "./protocol";
 import { AppState, ChatLine, createInitialState, phaseFromAgentState, type SettingsSection } from "./state";
 import { createComposer } from "./components/composer";
-import { createHistoryList } from "./components/historyList";
 import { createMessageList } from "./components/messageList";
 import { createSessionBar } from "./components/sessionBar";
 import { renderChatView } from "./views/chatView";
@@ -12,22 +10,11 @@ import { renderSettingsView } from "./views/settingsView";
 const state: AppState = createInitialState();
 
 /**
- * Host-message coalescing for assistant text deltas: chunks arrive per token
- * from the runtime; the coalescer releases them to the message list every
- * ~110ms so the DOM is touched at a steady visual cadence, not per event.
- * The message list accumulates internally too — the two layers together keep
- * per-second DOM writes bounded regardless of provider chunk size.
+ * Assistant text deltas are forwarded straight to the message list, which owns
+ * the single streaming accumulator and batches paints to animation frames.
+ * There is deliberately no second coalescer here: two schedulers buffering the
+ * same stream was what made the reveal look chunky.
  */
-let deltaCoalescer = createStreamCoalescer((text) => {
-  messageList.upsertStreamingLine(text);
-});
-
-function resetDeltaCoalescer(): void {
-  deltaCoalescer.close();
-  deltaCoalescer = createStreamCoalescer((text) => {
-    messageList.upsertStreamingLine(text);
-  });
-}
 
 /**
  * Transcript staleness guard. A transcript reply is only applied when it is
@@ -44,10 +31,6 @@ function isStaleTranscript(sessionId: string): boolean {
 const runtimePill = mustEl("runtime-pill");
 const settingsBtn = mustEl("settings-btn") as HTMLButtonElement;
 const settingsBack = mustEl("settings-back") as HTMLButtonElement;
-const historyBtn = mustEl("history-btn") as HTMLButtonElement;
-const historyBack = mustEl("history-back") as HTMLButtonElement;
-const historyView = mustEl("history-view");
-const historyListRoot = mustEl("history-list");
 const setupBanner = mustEl("setup-banner");
 const settingsView = mustEl("settings-view");
 const chatView = mustEl("chat-view");
@@ -74,20 +57,7 @@ const composer = createComposer(composerRoot, {
   onToggleAutoApprove: toggleAutoApprove,
 });
 const sessionBar = createSessionBar(sessionBarRoot, {
-  onSelect: (sessionId) => selectSession(sessionId),
   onCreate: () => startNewConversation(),
-});
-const historyList = createHistoryList(historyListRoot, {
-  onOpen: (sessionId) => {
-    state.view = "chat";
-    selectSession(sessionId);
-    render();
-  },
-  onNew: () => {
-    state.view = "chat";
-    startNewConversation();
-    render();
-  },
 });
 
 settingsBtn.addEventListener("click", () => {
@@ -95,14 +65,6 @@ settingsBtn.addEventListener("click", () => {
   render();
 });
 settingsBack.addEventListener("click", () => {
-  state.view = "chat";
-  render();
-});
-historyBtn.addEventListener("click", () => {
-  state.view = state.view === "history" ? "chat" : "history";
-  render();
-});
-historyBack.addEventListener("click", () => {
   state.view = "chat";
   render();
 });
@@ -114,23 +76,6 @@ postToHost({ type: "LIST_SESSIONS" });
 postToHost({ type: "GET_PERMISSION_RULES" });
 postToHost({ type: "GET_EXTENSION_INFO" });
 render();
-
-/**
- * Activates an existing conversation immediately in the UI (optimistic), then
- * asks the host for it. Re-pointing loadedTranscriptSessionId before the
- * request is what makes the optimistic reset immune to stale transcript
- * replies. GET_TRANSCRIPT on an unknown/empty session returns no TRANSCRIPT
- * message, so the empty state survives until real content exists.
- */
-function selectSession(sessionId: string): void {
-  loadedTranscriptSessionId = sessionId;
-  state.activeSessionId = sessionId;
-  state.pendingNewConversation = false;
-  state.running = false;
-  state.phase = "idle";
-  postToHost({ type: "SELECT_SESSION", sessionId });
-  postToHost({ type: "GET_TRANSCRIPT", sessionId });
-}
 
 /**
  * New conversation lifecycle: reset the active conversation state immediately
@@ -223,9 +168,6 @@ function handleHostMessage(message: HostToGui): void {
     case "SHOW_SETTINGS":
       state.view = "settings";
       break;
-    case "SHOW_HISTORY":
-      state.view = "history";
-      break;
     case "SESSION_UPDATED":
       applySessionUpdate(message.sessions, message.activeSessionId);
       break;
@@ -245,8 +187,7 @@ function handleHostMessage(message: HostToGui): void {
       if (isStaleTranscript(message.sessionId)) {
         break;
       }
-      // A conversation switch discards any in-flight streaming deltas.
-      resetDeltaCoalescer();
+      // A conversation switch discards any in-flight streaming state.
       loadedTranscriptSessionId = message.sessionId;
       state.messages = message.entries.map(toChatLine);
       messageList.replaceAll(state.messages);
@@ -257,9 +198,9 @@ function handleHostMessage(message: HostToGui): void {
       applyAgentState(message.state);
       break;
     case "AGENT_MESSAGE": {
-      // Flush pending deltas first so the final message replaces exactly the
-      // text that was already painted (same source, no duplication).
-      deltaCoalescer.close();
+      // Finalizing closes the streaming accumulator first, so the final text
+      // replaces exactly the text that was already painted (one source of
+      // truth, no duplication possible).
       const text = sanitizeAgentMessage(message.message);
       if (text.length === 0) {
         messageList.finishStreamingLine("");
@@ -282,9 +223,9 @@ function handleHostMessage(message: HostToGui): void {
         break;
       }
       state.phase = "streaming";
-      // Accumulate and paint on the ~110ms cadence; the coalescer flushes
-      // everything on close(), so nothing is lost on finalize.
-      deltaCoalescer.push(text);
+      // The message list owns the accumulator and paints at most once per
+      // animation frame; close()/endStreamingTurn() flush the remainder.
+      messageList.upsertStreamingLine(text);
       chatLineChanged = true;
       break;
     }
@@ -311,7 +252,6 @@ function handleHostMessage(message: HostToGui): void {
     }
     case "AGENT_THINKING": {
       // Safe status text only (classification gates run in the agent loop).
-      deltaCoalescer.close();
       messageList.upsertThinkingBlock(message.message, "active");
       state.phase = "submitting";
       chatLineChanged = true;
@@ -319,9 +259,8 @@ function handleHostMessage(message: HostToGui): void {
     }
     case "AGENT_TOOL_CALL": {
       // tool_requested: create the execution box; later events update it in place.
-      // Turn boundary: flush any streamed assistant text so it settles before
-      // the tool block (endStreamingTurn inside also resets the segment).
-      deltaCoalescer.close();
+      // Turn boundary: the upsert below flushes and settles any streamed
+      // assistant text before the tool block.
       const toolCall = message.toolCall;
       if (toolCall.toolName === "run_command" && toolCall.command) {
         messageList.upsertCommandLine({ command: toolCall.command, running: true, toolCallId: toolCall.toolCallId });
@@ -374,9 +313,9 @@ function handleHostMessage(message: HostToGui): void {
     case "AGENT_ERROR": {
       state.running = false;
       state.phase = "failed";
-      deltaCoalescer.close();
+      // Preserve whatever was already streamed; only the empty placeholder is
+      // dropped, then the error line is appended.
       messageList.finishStreamingLine("");
-      resetDeltaCoalescer();
       const errorLine: ChatLine = { role: "error", text: message.error };
       state.messages.push(errorLine);
       messageList.append([errorLine]);
@@ -439,16 +378,14 @@ function applyAgentState(agentState: string): void {
   state.running = agentState === "starting" || agentState === "ready" || agentState === "running";
   if (["completed", "cancelled", "failed", "disconnected", "idle"].includes(agentState)) {
     state.running = false;
-    // Cancellation/error/interrupt path: flush whatever was painted so the
-    // partial text is finalized cleanly, then reset the delta scheduler.
-    deltaCoalescer.close();
+    // Cancellation/error/interrupt path: finalize the partial text cleanly
+    // (finishStreamingLine also flushes and resets the accumulator).
     messageList.finishStreamingLine("");
-    resetDeltaCoalescer();
   }
   if (agentState === "starting") {
-    // A new run begins: make sure no stale deltas from a previous run leak
-    // into the upcoming stream.
-    resetDeltaCoalescer();
+    // A new run begins: settle the previous segment so no stale text is
+    // concatenated onto the upcoming stream.
+    messageList.endStreamingTurn();
   }
 }
 
@@ -487,21 +424,13 @@ function scheduleUiSync(): void {
 function render(): void {
   runtimePill.textContent = runtimeLabel();
   settingsBtn.textContent = state.view === "settings" ? "Chat" : "Settings";
-  historyBtn.textContent = state.view === "history" ? "Chat" : "History";
   const showSettings = state.view === "settings";
-  const showHistory = state.view === "history";
   settingsView.hidden = !showSettings;
-  historyView.hidden = !showHistory;
-  chatView.hidden = showSettings || showHistory;
-
-  if (showHistory) {
-    historyList.update(state.sessions, state.activeSessionId, state.running);
-    return;
-  }
+  chatView.hidden = showSettings;
 
   if (!showSettings) {
     renderSetupBanner();
-    sessionBar.update(state.sessions, state.activeSessionId, state.running);
+    sessionBar.update(state.running);
     renderChatView(
       { composer },
       state,

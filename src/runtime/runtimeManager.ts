@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as path from "node:path";
 import type { PermissionManager } from "../permissions/permissionManager";
 import type { SessionStore } from "../session/sessionStore";
-import type { PersistedProviderConfig, ProviderConfigStore } from "../session/providerConfigStore";
+import { profileIdFor, type PersistedProviderConfig, type ProviderConfigStore } from "../session/providerConfigStore";
 import type { TranscriptEntry, TranscriptStore } from "../session/transcriptStore";
 import type { Logger } from "../utils/logger";
 import { ToolRouter } from "./tools/toolRouter";
@@ -24,6 +24,7 @@ import {
   RuntimeToolCallResponse,
   RuntimeToolExecutor,
 } from "./runtimeTypes";
+import type { BackgroundProcessManager } from "./tools/backgroundProcessManager";
 
 export interface RuntimeManagerOptions {
   readonly sessionStore: SessionStore;
@@ -36,6 +37,8 @@ export interface RuntimeManagerOptions {
   readonly diffView?: DiffViewService;
   /** Persists the selected provider config so restarts restore it. */
   readonly providerConfigStore?: ProviderConfigStore;
+  /** Injected background-process manager; disposed with the runtime. */
+  readonly backgroundProcesses?: import("./tools/backgroundProcessManager").BackgroundProcessManager;
 }
 
 interface ActiveRun {
@@ -43,11 +46,68 @@ interface ActiveRun {
   providerSessionId?: string;
 }
 
+/**
+ * Providers whose runtime cannot be configured from persisted data alone: the
+ * caller must re-attach a credential from SecretStorage first. Everything else
+ * is applied during `restoreProviderConfig()`.
+ */
+const CREDENTIAL_PROVIDERS: ReadonlySet<RuntimeProviderConfig["provider"]> = new Set(["openrouter"]);
+
+/** Attaches a credential to a config whose runtime declares an apiKey slot. */
+function withApiKey(config: RuntimeProviderConfig, credential: string): RuntimeProviderConfig {
+  if (config.provider === "openrouter") {
+    return { ...config, apiKey: credential };
+  }
+  if (config.provider === "openai-compatible") {
+    return { ...config, apiKey: credential };
+  }
+  return config;
+}
+
+/** Result of a provider restore attempt. */
+export interface ProviderRestoreResult {
+  readonly config: PersistedProviderConfig;
+  /** True when the runtime was configured during the restore. */
+  readonly applied: boolean;
+}
+
 /** Live command-output flush cadence: ~8 updates/second, not per chunk. */
 const COMMAND_STREAM_INTERVAL_MS = 120;
 
 function commandTextFromCall(call: RuntimeToolCall): string {
   return isRecord(call.input) && typeof call.input.command === "string" ? call.input.command : "";
+}
+
+/**
+ * Best-effort path shown in a permission request. Multi-path tools report how
+ * many targets they touch so the prompt is still informative.
+ */
+function describePermissionTarget(input: Record<string, unknown>): string | undefined {
+  if (Array.isArray(input.files)) {
+    const count = input.files.length;
+    return count === 1 && typeof input.files[0] === "string"
+      ? input.files[0]
+      : `${count} files`;
+  }
+  if (typeof input.file_path === "string") {
+    return input.file_path;
+  }
+  if (typeof input.path === "string") {
+    return input.path;
+  }
+  return typeof input.from === "string" ? input.from : undefined;
+}
+
+/** Serialized result size for logs; never the content itself. */
+function resultSize(result: unknown): number {
+  if (result === undefined) {
+    return 0;
+  }
+  try {
+    return JSON.stringify(result)?.length ?? 0;
+  } catch {
+    return 0;
+  }
 }
 
 export class RuntimeManager implements vscode.Disposable {
@@ -58,11 +118,20 @@ export class RuntimeManager implements vscode.Disposable {
   private readonly persistenceQueue: Promise<void>;
   private activeProvider?: RuntimeProviderConfig["provider"];
   private activeConfig?: RuntimeProviderConfig;
+  /** Profile id of the active provider selection; keys its stored credential. */
+  private activeProfileId?: string;
   private activeSessionId?: string;
   private readonly lastPrompts = new Map<string, string>();
   private readonly toolRouter: ToolRouter;
   private readonly reviewManager = new FileChangeReviewManager();
   private readonly usageBySession = new Map<string, RuntimeUsage>();
+  /**
+   * Managed background processes started by `background_command`. Disposed with
+   * the runtime so long-running processes are not orphaned when the extension
+   * deactivates; never persisted across restarts.
+   */
+  private readonly backgroundProcesses: import("./tools/backgroundProcessManager").BackgroundProcessManager;
+
   /**
    * Live command-output buffers, keyed by toolCallId. Chunks are coalesced and
    * flushed on a short interval so a chatty command cannot flood the webview;
@@ -78,6 +147,7 @@ export class RuntimeManager implements vscode.Disposable {
   constructor(private readonly options: RuntimeManagerOptions) {
     this.persistenceQueue = Promise.resolve();
     this.toolRouter = new ToolRouter(options.toolExecutor);
+    this.backgroundProcesses = options.backgroundProcesses ?? new BackgroundProcessManager();
     for (const runtime of options.runtimes) {
       this.runtimes.set(runtime.provider, runtime);
     }
@@ -174,6 +244,9 @@ export class RuntimeManager implements vscode.Disposable {
     await runtime.configure(config);
     this.activeProvider = config.provider;
     this.activeConfig = config;
+    // Deterministic and identical to what the store derives, so the credential
+    // slot can be resolved without waiting for persistence.
+    this.activeProfileId = profileIdFor(config.provider, "baseUrl" in config ? config.baseUrl : undefined);
     // Remember the selection (never secrets) so the next start restores it.
     void this.options.providerConfigStore?.save(config).catch(() => {
       // Persistence is best-effort; the runtime is already usable.
@@ -199,8 +272,10 @@ export class RuntimeManager implements vscode.Disposable {
     }
 
     const config = this.activeConfig;
+    const identity = this.activeProfileId ? { profileId: this.activeProfileId } : {};
     if (config.provider === "openai-compatible") {
       return {
+        ...identity,
         provider: config.provider,
         baseUrl: config.baseUrl,
         modelId: config.modelId,
@@ -209,22 +284,24 @@ export class RuntimeManager implements vscode.Disposable {
     }
     if (config.provider === "openrouter") {
       return {
+        ...identity,
         provider: config.provider,
         modelId: config.modelId,
         ...(config.apiKey ? { apiKey: config.apiKey } : {}),
       };
     }
     if (config.provider === "ollama") {
-      return { provider: config.provider, baseUrl: config.baseUrl, modelId: config.modelId };
+      return { ...identity, provider: config.provider, baseUrl: config.baseUrl, modelId: config.modelId };
     }
     if (config.provider === "mock") {
       return {
+        ...identity,
         provider: config.provider,
         scenario: config.scenario,
         delayMs: config.delayMs,
       };
     }
-    return { provider: config.provider, modelId: config.modelId };
+    return { ...identity, provider: config.provider, modelId: config.modelId };
   }
 
   async checkAvailability(signal?: AbortSignal): Promise<ReturnType<AgentRuntime["checkAvailability"]>> {
@@ -344,18 +421,19 @@ export class RuntimeManager implements vscode.Disposable {
   }
 
   /**
-   * Restores the persisted provider configuration (never secrets). Local
-   * providers are applied directly; OpenRouter is returned unapplied so the
-   * caller can re-attach its API key from SecretStorage and skip the restore
-   * entirely when no key is available.
+   * Restores the persisted provider selection (never secrets). Providers whose
+   * runtime needs no credential are applied immediately (`applied: true`);
+   * credential-backed providers come back unapplied so the caller resolves the
+   * profile's secret from SecretStorage and calls `completeRestore` — or skips
+   * the restore entirely when no credential is stored.
    */
-  async restoreProviderConfig(): Promise<PersistedProviderConfig | undefined> {
+  async restoreProviderConfig(): Promise<ProviderRestoreResult | undefined> {
     const saved = this.options.providerConfigStore?.load();
     if (!saved) {
       return undefined;
     }
-    if (saved.provider === "openrouter") {
-      return saved;
+    if (CREDENTIAL_PROVIDERS.has(saved.provider)) {
+      return { config: saved, applied: false };
     }
     const runtime = this.runtimes.get(saved.provider);
     if (!runtime) {
@@ -369,11 +447,26 @@ export class RuntimeManager implements vscode.Disposable {
       await runtime.configure(config);
       this.activeProvider = saved.provider;
       this.activeConfig = config;
+      this.activeProfileId = saved.profileId ?? profileIdFor(saved.provider, saved.baseUrl);
     } catch {
       // A stale saved config must not break activation; start unconfigured.
       return undefined;
     }
-    return saved;
+    return { config: saved, applied: true };
+  }
+
+  /**
+   * Finishes a restore that was waiting for a credential: applies the saved
+   * selection with the resolved secret. Provider-agnostic — the credential is
+   * attached only when the runtime config declares an `apiKey` slot.
+   */
+  async completeRestore(saved: PersistedProviderConfig, credential?: string): Promise<boolean> {
+    const config = this.toRuntimeProviderConfig(saved);
+    if (!config) {
+      return false;
+    }
+    await this.setProvider(credential ? withApiKey(config, credential) : config);
+    return true;
   }
 
   async restoreSessions(): Promise<void> {
@@ -518,6 +611,18 @@ export class RuntimeManager implements vscode.Disposable {
       this.activeRuns.delete(sessionId);
       this.clearSessionCommandStreams(sessionId);
       this.options.permissionManager.cancelSessionRequests(sessionId);
+      // Transcript appends are queued, not awaited, per event (a run must not
+      // block on disk). Flushing here means the run is durable by the time the
+      // caller sees it finish, so a restore can never miss the last entries.
+      await this.flushTranscript(sessionId);
+    }
+  }
+
+  private async flushTranscript(sessionId: string): Promise<void> {
+    try {
+      await this.options.transcriptStore?.flush(sessionId);
+    } catch {
+      // Persistence is best-effort and must never fail a run.
     }
   }
 
@@ -565,6 +670,7 @@ export class RuntimeManager implements vscode.Disposable {
     for (const runtime of this.runtimes.values()) {
       runtime.dispose();
     }
+    void this.backgroundProcesses.dispose();
     this.emitter.dispose();
   }
 
@@ -642,14 +748,41 @@ export class RuntimeManager implements vscode.Disposable {
           }
         : {}),
     };
+    const startedAt = Date.now();
     const response = await this.toolRouter.route(
       call,
       context,
       (toolCall, toolSignal) => this.authorizeTool(sessionId, toolCall, toolSignal),
       { mode },
     );
+    this.logToolExecution(sessionId, call, response, Date.now() - startedAt);
     await this.captureFileChange(sessionId, call, "end", response);
     return response;
+  }
+
+  /**
+   * Structured tool observability. Never logs file contents, arguments, or
+   * credentials — only the tool name, duration, outcome, cancellation and the
+   * serialized result size.
+   */
+  private logToolExecution(
+    sessionId: string,
+    call: RuntimeToolCall,
+    response: RuntimeToolCallResponse,
+    durationMs: number,
+  ): void {
+    this.options.logger?.info("Tool execution finished", {
+      operation: "toolExecution",
+      sessionId,
+      toolName: call.name,
+      durationMs,
+      resultBytes: resultSize(response.result),
+      outcome: response.error
+        ? /cancel/i.test(response.error)
+          ? "cancelled"
+          : "failed"
+        : "succeeded",
+    });
   }
 
   /**
@@ -771,13 +904,7 @@ export class RuntimeManager implements vscode.Disposable {
 
     const input = isRecord(call.input) ? call.input : {};
     const command = typeof input.command === "string" ? input.command : undefined;
-    const path = typeof input.file_path === "string"
-      ? input.file_path
-      : typeof input.path === "string"
-        ? input.path
-        : typeof input.from === "string"
-          ? input.from
-          : undefined;
+    const path = describePermissionTarget(input);
     const request = this.options.permissionManager.buildRequest(
       session.sessionId,
       call.name,

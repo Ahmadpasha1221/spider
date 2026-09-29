@@ -55,7 +55,10 @@ describe("MessageRouter OpenRouter", () => {
     expect(result.type).toBe("RUNTIME_STATUS");
     expect(result.connected).toBe(true);
     expect(JSON.stringify(result)).not.toContain("sk-or-test");
-    expect(secrets.store).toHaveBeenCalledWith("codeviaCursor.openrouter.key", "sk-or-test");
+    // Credentials are keyed by profile id; the legacy single key is migrated
+    // away on the first write (see messageRouter.providerProfiles.test.ts).
+    expect(secrets.store).toHaveBeenCalledWith("codeviaCursor.provider.openrouter-default.apiKey", "sk-or-test");
+    expect(secrets.delete).toHaveBeenCalledWith("codeviaCursor.openrouter.key");
   });
 
   it("rejects connecting without an API key", async () => {

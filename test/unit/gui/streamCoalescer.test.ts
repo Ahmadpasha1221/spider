@@ -1,126 +1,158 @@
 import { describe, expect, it, vi } from "vitest";
-import { STREAM_PAINT_INTERVAL_MS, createStreamCoalescer } from "../../../gui/src/streamCoalescer";
+import { createStreamCoalescer } from "../../../gui/src/streamCoalescer";
 
 /**
- * Deterministic fake scheduler: callbacks fire only when tests advance the
- * clock manually, so cadence behavior is asserted exactly without real time.
+ * Deterministic fake animation frames: callbacks only fire when the test runs a
+ * frame explicitly, so batching behavior is asserted exactly — no timers, no
+ * real frame scheduling.
  */
-function fakeClock() {
-  let now = 0;
+function fakeFrames() {
   let nextId = 1;
-  const timers = new Map<number, { at: number; callback: () => void }>();
+  const frames = new Map<number, () => void>();
   return {
-    schedule: (callback: () => void, ms: number) => {
+    schedule: (callback: () => void) => {
       const id = nextId++;
-      timers.set(id, { at: now + ms, callback });
+      frames.set(id, callback);
       return id;
     },
     cancel: (handle: unknown) => {
-      timers.delete(handle as number);
+      frames.delete(handle as number);
     },
-    advance(ms: number) {
-      now += ms;
-      for (const [id, timer] of Array.from(timers.entries()).sort((a, b) => a[1].at - b[1].at)) {
-        if (timer.at <= now) {
-          timers.delete(id);
-          timer.callback();
-        }
+    runFrame: () => {
+      const pending = Array.from(frames.values());
+      frames.clear();
+      for (const callback of pending) {
+        callback();
       }
     },
-    pendingCount: () => timers.size,
+    pendingCount: () => frames.size,
   };
 }
 
-function makeCoalescer(intervalMs = STREAM_PAINT_INTERVAL_MS) {
-  const clock = fakeClock();
+function makeCoalescer() {
+  const frames = fakeFrames();
   const paints: string[] = [];
-  const coalescer = createStreamCoalescer((text) => paints.push(text), intervalMs, clock.schedule, clock.cancel);
-  return { coalescer, paints, ...clock };
+  const coalescer = createStreamCoalescer((text) => paints.push(text), frames.schedule, frames.cancel);
+  return { coalescer, paints, runFrame: frames.runFrame, pendingCount: frames.pendingCount };
 }
 
 describe("streamCoalescer", () => {
-  it("paints the first chunk immediately (no initial latency)", () => {
-    const { coalescer, paints } = makeCoalescer();
+  it("schedules the first chunk onto the next frame instead of painting synchronously", () => {
+    const { coalescer, paints, runFrame, pendingCount } = makeCoalescer();
     coalescer.push("Here");
+    expect(paints).toEqual([]);
+    expect(pendingCount()).toBe(1);
+    runFrame();
     expect(paints).toEqual(["Here"]);
     coalescer.close();
   });
 
-  it("coalesces rapid chunks into one paint per interval", () => {
-    const { coalescer, paints, advance } = makeCoalescer(100);
+  it("coalesces every chunk of a burst into a single paint per frame", () => {
+    const { coalescer, paints, runFrame, pendingCount } = makeCoalescer();
     coalescer.push("Here");
     coalescer.push(" is");
     coalescer.push(" the");
-    // Nothing scheduled beyond the running interval yet; advancing releases
-    // everything accumulated since the first paint.
-    advance(100);
-    expect(paints).toEqual(["Here", " is the"]);
+    // Still one scheduled frame for the whole burst.
+    expect(pendingCount()).toBe(1);
+    runFrame();
+    expect(paints).toEqual(["Here is the"]);
     coalescer.close();
   });
 
-  it("keeps a steady cadence while chunks keep arriving", () => {
-    const { coalescer, paints, advance } = makeCoalescer(110);
-    coalescer.push("a"); // immediate
-    advance(110);
-    coalescer.push("b");
-    advance(110);
-    coalescer.push("c");
-    advance(110);
-    expect(paints).toEqual(["a", "b", "c"]);
+  it("preserves arrival order across frames and never paints out of order", () => {
+    const { coalescer, paints, runFrame } = makeCoalescer();
+    coalescer.push("1");
+    runFrame();
+    coalescer.push("2");
+    runFrame();
+    coalescer.push("3");
+    runFrame();
+    expect(paints).toEqual(["1", "2", "3"]);
     coalescer.close();
   });
 
-  it("stops the cadence when the stream goes idle, resumes on the next push", () => {
-    const { coalescer, paints, advance, pendingCount } = makeCoalescer(110);
-    coalescer.push("hello");
-    advance(110);
-    expect(pendingCount()).toBe(0); // idle: no timer looping in the background
-    advance(1000);
-    expect(paints).toEqual(["hello"]);
-    coalescer.push(" world"); // resumes with an immediate paint
-    expect(paints).toEqual(["hello", " world"]);
+  it("never drops or duplicates text: the painted total equals everything pushed", () => {
+    const { coalescer, paints, runFrame } = makeCoalescer();
+    const chunks = ["alpha", " beta", " gamma", " delta"];
+    coalescer.push(chunks[0]);
+    runFrame();
+    coalescer.push(chunks[1]);
+    coalescer.push(chunks[2]);
+    runFrame();
+    coalescer.push(chunks[3]);
     coalescer.close();
+    expect(paints.join("")).toBe(chunks.join(""));
   });
 
-  it("flushes pending text on close exactly once", () => {
-    const { coalescer, paints, advance } = makeCoalescer(110);
+  it("close flushes the remainder synchronously, cancels the pending frame, and is idempotent", () => {
+    const { coalescer, paints, pendingCount } = makeCoalescer();
     coalescer.push("Here is");
     coalescer.push(" the implementation");
+    expect(pendingCount()).toBe(1);
+
     coalescer.close();
-    advance(110); // no timers left; nothing double-fires
+    expect(pendingCount()).toBe(0);
     expect(paints.join("")).toBe("Here is the implementation");
-    expect(paints[0]).toBe("Here is");
-    expect(paints).toHaveLength(2);
+
+    coalescer.close(); // idempotent: nothing left to flush
+    expect(paints).toHaveLength(1);
   });
 
-  it("close is idempotent and ignores empty pushes", () => {
+  it("a pending frame cancelled by close never fires afterwards", () => {
+    const frames = fakeFrames();
+    const onPaint = vi.fn();
+    const coalescer = createStreamCoalescer(onPaint, frames.schedule, frames.cancel);
+    coalescer.push("one");
+    expect(frames.pendingCount()).toBe(1);
+
+    coalescer.close();
+    expect(frames.pendingCount()).toBe(0);
+    expect(onPaint).toHaveBeenCalledTimes(1);
+    frames.runFrame(); // nothing scheduled
+    expect(onPaint).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores empty pushes and reports open state across the lifecycle", () => {
     const { coalescer, paints } = makeCoalescer();
-    coalescer.push("");
-    coalescer.close();
-    coalescer.close();
-    expect(paints).toEqual([]);
-  });
-
-  it("reports open state across the lifecycle", () => {
-    const { coalescer } = makeCoalescer();
     expect(coalescer.isOpen).toBe(false);
+    coalescer.push("");
+    expect(coalescer.pending).toBe("");
+    expect(paints).toEqual([]);
+
     coalescer.push("x");
     expect(coalescer.isOpen).toBe(true);
+    expect(coalescer.pending).toBe("x");
     coalescer.close();
     expect(coalescer.isOpen).toBe(false);
+    expect(coalescer.pending).toBe("");
   });
 
-  it("a cancelled interval never fires after close", () => {
-    const clock = fakeClock();
-    const paints: string[] = [];
-    const onTick = vi.fn((text: string) => paints.push(text));
-    const coalescer = createStreamCoalescer(onTick, 110, clock.schedule, clock.cancel);
-    coalescer.push("one");
-    clock.advance(110);
-    coalescer.push("two");
+  it("reset drops pending text without painting (conversation switch / clear)", () => {
+    const { coalescer, paints, pendingCount } = makeCoalescer();
+    coalescer.push("stale assistant text");
+    expect(pendingCount()).toBe(1);
+
+    coalescer.reset();
+
+    expect(pendingCount()).toBe(0);
+    expect(paints).toEqual([]);
+    expect(coalescer.pending).toBe("");
+    expect(coalescer.isOpen).toBe(false);
+    // A later push starts cleanly: the discarded text can never leak back in.
+    coalescer.push("fresh");
     coalescer.close();
-    expect(clock.pendingCount()).toBe(0);
-    clock.advance(5000);
-    expect(paints.join("")).toBe("onetwo");
+    expect(paints).toEqual(["fresh"]);
+  });
+
+  it("a fresh push after a completed frame schedules a new frame", () => {
+    const { coalescer, paints, runFrame, pendingCount } = makeCoalescer();
+    coalescer.push("a");
+    runFrame();
+    expect(pendingCount()).toBe(0);
+    coalescer.push("b");
+    expect(pendingCount()).toBe(1);
+    runFrame();
+    expect(paints).toEqual(["a", "b"]);
+    coalescer.close();
   });
 });

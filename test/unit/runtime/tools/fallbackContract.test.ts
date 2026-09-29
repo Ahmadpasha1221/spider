@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildFallbackToolContract, listAvailableToolNames, listRegisteredTools } from "../../../../src/runtime/tools/toolRegistry";
 
 describe("fallback tool contract", () => {
-  it("lists exactly the ten canonical tools", () => {
+  it("lists exactly the fifteen canonical tools", () => {
     expect(listAvailableToolNames()).toEqual([
       "list_files",
       "read_file",
@@ -13,6 +13,11 @@ describe("fallback tool contract", () => {
       "move_file",
       "delete_file",
       "run_command",
+      "read_multiple_files",
+      "grep_search",
+      "glob_search",
+      "get_diagnostics",
+      "git_status",
       "finish",
     ]);
   });

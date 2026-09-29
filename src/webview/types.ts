@@ -135,7 +135,6 @@ export type ExtensionMessage =
   | { type: "LOCAL_MODELS"; provider: LocalProvider; models: LocalModelInfo[]; error?: string }
   | OpenRouterModelListMessage
   | { type: "SHOW_SETTINGS" }
-  | { type: "SHOW_HISTORY" }
   | { type: "RUN_STARTED"; runId: string }
   | { type: "RUN_COMPLETED"; runId: string }
   | {

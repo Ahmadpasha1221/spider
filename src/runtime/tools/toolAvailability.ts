@@ -20,11 +20,14 @@ export interface AgentModeDefinition {
   readonly tools: readonly string[];
 }
 
-/** Read/search tools allowed in read-only modes (Ask, Plan). */
+/**
+ * Read/search tools allowed in read-only modes (Ask, Plan): every tool whose
+ * permission is "safe" and which is not a terminal command. Derived from the
+ * registry, so a new read-only tool joins the read-only modes automatically.
+ */
 function readOnlyToolNames(): string[] {
   return listRegisteredTools()
-    .filter((tool) => tool.category === "filesystem" || tool.category === "search" || tool.category === "workflow")
-    .filter((tool) => tool.permission === "safe")
+    .filter((tool) => tool.permission === "safe" && tool.category !== "terminal")
     .map((tool) => tool.name);
 }
 

@@ -1,44 +1,59 @@
 /**
- * Time-based coalescer for streaming text: accumulates incoming chunks and
- * releases the accumulated text on a fixed cadence (~110ms) instead of on
- * every event. This is a scheduling helper only — it never invents text and
- * never delays the final flush (close() releases everything immediately).
+ * Frame-batched accumulator for streaming text — the ONE scheduler on the UI
+ * side of the stream.
  *
- * Framework-free so it can be unit-tested without a DOM.
+ * Chunks arrive as fast as the provider produces them; instead of painting per
+ * chunk (or on an arbitrary timer) they accumulate here and are released once
+ * per animation frame. That keeps DOM writes bounded by the display refresh
+ * rate and makes the reveal smooth instead of chunky.
+ *
+ * Guarantees (see streamCoalescer.test.ts):
+ *  - order is preserved (chunks are appended in arrival order),
+ *  - nothing is dropped (the buffer is painted on the next frame or by close()),
+ *  - nothing is duplicated (the buffer is cleared when it is painted),
+ *  - close() cancels the pending frame and flushes the remainder synchronously,
+ *    so the finalized message always matches what was painted.
+ *
+ * Framework-free and scheduler-injected so it can be unit-tested without a DOM
+ * or real animation frames.
  */
 export interface StreamCoalescer {
-  /** Adds a chunk to the buffer and schedules the next tick if needed. */
+  /** Adds a chunk to the buffer and schedules the next paint frame if needed. */
   push(text: string): void;
-  /** Flushes everything pending immediately (end of stream / finalize). */
+  /** Flushes everything pending synchronously (end of stream / finalize). */
   close(): void;
+  /**
+   * Drops everything pending WITHOUT painting (conversation switch / clear).
+   * Used when the target element is being replaced: flushing here would paint
+   * stale text into an already-emptied list.
+   */
+  reset(): void;
   /** True while the stream is open (push() called, close() not yet). */
   readonly isOpen: boolean;
+  /** Text accumulated since the last paint. Exposed for the renderer's source of truth. */
+  readonly pending: string;
 }
 
-export const STREAM_PAINT_INTERVAL_MS = 110;
+export type FrameScheduler = (callback: () => void) => unknown;
+export type FrameCanceller = (handle: unknown) => void;
 
 export function createStreamCoalescer(
-  onTick: (text: string) => void,
-  intervalMs = STREAM_PAINT_INTERVAL_MS,
-  schedule: (callback: () => void, ms: number) => unknown = (callback, ms) => setTimeout(callback, ms),
-  cancel: (handle: unknown) => void = (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  onPaint: (text: string) => void,
+  schedule: FrameScheduler = (callback) => requestAnimationFrame(callback),
+  cancel: FrameCanceller = (handle) => cancelAnimationFrame(handle as number),
 ): StreamCoalescer {
-  let buffer = "";
-  let handle: unknown = undefined;
+  let pending = "";
+  let frame: unknown = undefined;
   let open = false;
 
-  function tick(): void {
-    handle = undefined;
-    if (buffer.length === 0) {
-      // Nothing accumulated since the last tick; the next push() reschedules.
+  function paint(): void {
+    frame = undefined;
+    if (pending.length === 0) {
       return;
     }
-    const text = buffer;
-    buffer = "";
-    onTick(text);
-    if (open) {
-      handle = schedule(tick, intervalMs);
-    }
+    const text = pending;
+    pending = "";
+    onPaint(text);
   }
 
   return {
@@ -47,28 +62,34 @@ export function createStreamCoalescer(
         return;
       }
       open = true;
-      buffer += text;
-      if (handle === undefined) {
-        // First chunk (or resuming after an idle gap): emit immediately so
-        // the message appears the moment generation starts, then keep a
-        // steady cadence for subsequent chunks.
-        tick();
+      pending += text;
+      if (frame === undefined) {
+        // First chunk of a burst (or the first after an idle gap) is painted on
+        // the next frame; subsequent chunks join that same frame.
+        frame = schedule(paint);
       }
     },
     close() {
       open = false;
-      if (handle !== undefined) {
-        cancel(handle);
-        handle = undefined;
+      if (frame !== undefined) {
+        cancel(frame);
+        frame = undefined;
       }
-      if (buffer.length > 0) {
-        const text = buffer;
-        buffer = "";
-        onTick(text);
+      paint();
+    },
+    reset() {
+      open = false;
+      if (frame !== undefined) {
+        cancel(frame);
+        frame = undefined;
       }
+      pending = "";
     },
     get isOpen(): boolean {
       return open;
+    },
+    get pending(): string {
+      return pending;
     },
   };
 }

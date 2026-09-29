@@ -75,15 +75,22 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
   let thinkingBody: HTMLElement | undefined;
   let scrollScheduled = false;
   /**
-   * Accumulated text of the CURRENT streaming segment. Chunks append here;
-   * the text node is repainted on the coalescer cadence (~110ms), not per
-   * token, so generation feels continuous without per-token DOM writes.
+   * THE source of truth for the current assistant stream. Chunks append here
+   * synchronously and the coalescer repaints the text node at most once per
+   * animation frame, so generation feels continuous without per-chunk DOM
+   * writes. There is exactly one accumulator and one scheduler on the UI side
+   * (a second one upstream was what made streaming look chunky).
    */
   let streamText = "";
   let coalescer = createStreamCoalescer(paintStreamText);
 
+  /**
+   * Discards the streaming state without painting. Used when the list is being
+   * emptied or replaced: flushing pending text here would resurrect a stale
+   * line into the cleared list.
+   */
   function resetStreamState(): void {
-    coalescer.close();
+    coalescer.reset();
     coalescer = createStreamCoalescer(paintStreamText);
     streamText = "";
   }
@@ -349,9 +356,9 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
   }
 
   /**
-   * Coalescer tick: repaints the streaming line's text node from the
-   * accumulated buffer. One text-node write per ~110ms — no DOM rebuild, no
-   * sibling reflow — then a sticky-bottom scroll check on the same frame.
+   * Frame paint: appends the chunks accumulated since the previous frame to the
+   * streaming line's text node. No DOM rebuild, no sibling reflow — then a
+   * sticky-bottom scroll check on the same frame.
    */
   function paintStreamText(text: string): void {
     if (!streamingLine || !streamingLine.isConnected) {
@@ -417,8 +424,8 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       // status block does not pop away; it transitions into the response.
       this.settleThinkingBlock();
       ensureStreamingLine();
-      // Append the delta to the accumulator; the coalescer repaints on its
-      // ~110ms cadence (first chunk paints immediately).
+      // Append the delta to the single accumulator; the coalescer paints it on
+      // the next animation frame and close() flushes any remainder.
       streamText += text;
       coalescer.push(text);
     },
