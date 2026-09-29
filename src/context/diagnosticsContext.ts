@@ -85,13 +85,27 @@ function toDiagnosticContext(
   maxMessageLength: number,
 ): DiagnosticContext {
   const severity = toDiagnosticSeverity(diagnostic.severity);
+  const code = toDiagnosticCode(diagnostic.code);
   return {
     severity,
     message: truncateText(redactSensitiveText(diagnostic.message), maxMessageLength),
     source: diagnostic.source?.trim() || undefined,
+    ...(code ? { code } : {}),
     filePath: getUriPath(uri),
     range: createContextRange(diagnostic.range.start, diagnostic.range.end),
   };
+}
+
+/** VS Code reports codes as string | number | { value: string | number }. */
+function toDiagnosticCode(code: vscode.Diagnostic["code"]): string | undefined {
+  if (code === undefined || code === null) {
+    return undefined;
+  }
+  if (typeof code === "string" || typeof code === "number") {
+    return String(code);
+  }
+  const value = (code as { value?: unknown }).value;
+  return typeof value === "string" || typeof value === "number" ? String(value) : undefined;
 }
 
 function toDiagnosticSeverity(severity: vscode.DiagnosticSeverity): DiagnosticSeverity {

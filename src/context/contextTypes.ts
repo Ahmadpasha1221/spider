@@ -48,6 +48,8 @@ export interface DiagnosticContext {
   readonly severity: DiagnosticSeverity;
   readonly message: string;
   readonly source?: string;
+  /** Provider code (TypeScript 2345, eslint rule id, …) when one exists. */
+  readonly code?: string;
   readonly filePath: string;
   readonly range: ContextRange;
 }
