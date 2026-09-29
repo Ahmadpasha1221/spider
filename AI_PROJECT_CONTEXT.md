@@ -143,14 +143,27 @@ Changing `RuntimeEvent`/`RuntimeSendRequest` shapes requires updating
 | Wire serialization | `toOpenAiMessages` (OpenAI-compatible only) | Ollama NDJSON |
 | Model discovery | — | catalog mapping per provider |
 | Capability source | `RuntimeModel.capabilities` | how it is obtained |
-| Auth | — | OpenRouter: SecretStorage key; Ollama: none |
+| Auth | `ProviderCredentialStore` keyed by profile id | which provider accepts a credential |
 
-### Configuration persistence
-`src/session/providerConfigStore.ts` — `ProviderConfigStore` stores
-`{ provider, modelId?, baseUrl? }` under Memento key
-`codeviaCursor.providerConfig`. **Secrets never go here.** Wired in
-`extension.ts` activation: restore → re-attach OpenRouter key from
-SecretStorage → create a session if none exists.
+### Configuration persistence (provider profiles, 2026-09-29)
+`src/session/providerConfigStore.ts` — `ProviderConfigStore` holds **provider
+profiles**: `ProviderProfile { id, name, provider, modelId?, baseUrl?,
+metadata? }` plus `activeProfileId`, under Memento key
+`codeviaCursor.providerProfiles`. `profileIdFor(provider, baseUrl)` derives a
+stable id (`openrouter-default`, `ollama-http-127-0-0-1-11434`, …) — one
+profile per provider, plus one per distinct local endpoint.
+
+Backward compatibility: the legacy single-slot key
+`codeviaCursor.providerConfig` is still **read** (migrated in memory into one
+active profile on first load) and still **written** (the active profile is
+projected into it), so older builds and existing consumers keep working.
+`load()` returns the active profile in the legacy shape plus its `profileId`.
+
+**Secrets never go here.** Credentials live in SecretStorage, keyed per profile
+by `src/auth/providerCredentials.ts`
+(`codeviaCursor.provider.<profileId>.apiKey`). Wired in `extension.ts`
+activation: restore selection → resolve the profile's credential →
+`RuntimeManager.completeRestore` → create a session if none exists.
 
 ## 4. Agent Architecture
 
@@ -227,15 +240,55 @@ fallback contract. `isLocalToolName` is the membership test.
 | `move_file` | move/rename | `from`, `to` | modify | `{ from, to }` |
 | `delete_file` | delete file/empty dir | `path` | **destructive** | `{ path, deleted }` |
 | `run_command` | shell command in workspace | `command`, `cwd?`, `timeoutMs?` | execute | `{ command, stdout, stderr, exitCode, cwd? }` |
+| `read_multiple_files` | read up to 20 known files in one call | `files` (array, required) | safe | `{ files[{path,content,size}], errors[], requested, returned, totalBytes, truncated? }` |
+| `grep_search` | content search (text or regex) | `query` (required), `path?`, `isRegex?`, `caseSensitive?`, `fileGlob?`, `maxResults?` | safe | `{ query, path, matches[{path,line,column,text}], scannedFiles, truncated?, reason? }` |
+| `glob_search` | file-path search by glob | `pattern` (required), `path?`, `maxResults?` | safe | `{ pattern, path, files[...], scannedFiles, truncated?, reason? }` |
+| `get_diagnostics` | current VS Code diagnostics | `scope?` (`workspace`/`file`), `path?` | safe | `{ scope, diagnostics[{path,severity,message,source?,code?,start,end}], counts, truncated? }` |
+| `git_status` | read-only Git working tree | `path?`, `includeIgnored?` | safe | `{ repository, branch, detached, ahead, behind, clean, files[{path,status,staged,originalPath?}], truncated? }` |
 | `finish` | end the task | `summary` | safe | executed inline in the registry (no executor); sets `finished: true` |
+
+### Shared tool building blocks (Phase 1, 2026-09-29)
+- `toolError.ts` — the ONE error vocabulary (`invalid_input`, `permission_denied`,
+  `not_found`, `workspace_violation`, `timeout`, `cancelled`,
+  `dependency_unavailable`, `too_large`, `budget_exceeded`, `internal_error`),
+  `ToolExecutionError`, and `toToolErrorInfo` (maps Node error codes; never
+  surfaces a stack).
+- `workspacePath.ts` — lexical boundary check (`resolveWorkspacePath`) plus
+  `resolveWorkspacePathSafe`, which re-verifies the real path so a symlink
+  cannot escape the workspace. Every filesystem tool resolves through these.
+- `workspaceSearch.ts` — ONE walker (sorted, depth-limited, symlink-verified),
+  the shared ignore set (`.git`, `node_modules`, `dist`, `out`, `build`,
+  `coverage`, `.next`, `__pycache__`, `.venv`, …), binary detection, glob
+  compilation and the search limits. `search_files`, `grep_search`,
+  `glob_search` and `read_multiple_files` all sit on it.
+- `filesystemTools.ts` — `readWorkspaceTextFile` (shared by `read_file` and
+  `read_multiple_files`) + the multi-file reader and its caps
+  (20 files / 60 KB each / 120 KB total).
+- `gitStatusTool.ts` — argv-only `git` runner (`shell: false`,
+  `--no-optional-locks`, 15 s timeout, output capped, read only) and the
+  porcelain v2 parser.
+- `../diagnostics/diagnosticsSource.ts` — injectable diagnostics source;
+  normalization (severity, secret redaction, truncation, ordering) is reused
+  from the existing `src/context/diagnosticsContext.ts`.
+- `inferenceAgentLoop.ts` has NO per-tool branches: progress copy comes from
+  `RegisteredTool.summarize`, execution from the executor, routing from the
+  registry.
 
 ### ToolRouter
 `src/runtime/tools/toolRouter.ts` — `route(call, context, authorize, {mode})`:
 availability check (mode-based) → registry validation → permission authorize
 callback → execute → wraps result as `{ success, tool, message, ...details }`.
-Unknown/unavailable tools produce **structured failures back to the model**
-(listing the available set) — never exceptions to the user, never execution.
-`finish` sets `finished: true` on the response.
+Failures are structured `{ success: false, tool, code, error }` where `code`
+comes from the shared error vocabulary; unknown/unavailable tools list the
+available set. No failure ever throws to the user. `finish` sets
+`finished: true` on the response.
+
+### Resource limits & observability
+Every new tool is capped (files, bytes, results, scanned entries, diagnostics,
+Git files) and reports `{ truncated: true, reason }` instead of silently
+cutting results. `RuntimeManager.logToolExecution` logs one structured line per
+tool call (name, duration, outcome, result size, cancellation) and never logs
+arguments, file contents, or credentials.
 
 ### Availability
 `src/runtime/tools/toolAvailability.ts` — `AgentMode` (`agent`/`ask`/`plan`)
@@ -380,9 +433,14 @@ views, batches UI syncs (`scheduleUiSync` → one rAF per event burst).
   sticky-bottom scroll batched per frame; `clear()` for new conversations;
   `replaceAll` only for real conversation switches.
 - `components/composer.ts` — Send/Cancel/Try Again; never rebuilt while
-  typing (a rebuild once ate clicks between mousedown/mouseup).
-- `components/sessionBar.ts` — History dropdown + New button.
-- `components/historyList.ts` — dedicated History page list.
+  typing (a rebuild once ate clicks between mousedown/mouseup). Structural
+  `composer-input` wrapper (`position: relative`) with the action row
+  absolutely anchored inside the input area (no negative margins, textarea
+  bottom padding reserves the space); toolbar (model picker + shield) below.
+- `components/sessionBar.ts` — "New conversation" button only. History
+  navigation was removed from the chat UI (2026-09-29): no dropdown, no
+  History page, no `SHOW_HISTORY` — persistence is untouched.
+- `components/historyList.ts` — **deleted** with the History page.
 - `components/providerSettings.ts` + `views/settingsView.ts` — provider
   cards (Cursor, Local, OpenRouter, Mock).
 - `state.ts` — `AppState`, `ChatLine` (roles incl. `tool`), `AgentPhase`
@@ -423,18 +481,34 @@ are the source of truth for `phase`; the UI never infers state from text.
   button. Manual toggles set `data-userToggled` so the automatic settle never
   fights the user.
 
-### Text streaming UX (2026-09-27)
-Full path: provider chunks (Ollama NDJSON / OpenAI-compatible + OpenRouter
+### Text streaming UX (single accumulator, 2026-09-29)
+Full path: provider raw chunks (Ollama NDJSON / OpenAI-compatible + OpenRouter
 SSE) → stream gate → `onStreamDelta` → `text_delta` runtime event →
-`AGENT_TEXT_DELTA` → **delta coalescer (~110ms cadence, `main.ts`)** →
-`messageList.upsertStreamingLine` (accumulates into one text node) → paint +
-sticky-bottom scroll on the same frame. Tool-call events are separate
-activity blocks and never merge into the text stream. The streaming line
-keeps the caret (`.streaming-line::after`) while active; finalization
-(`AGENT_MESSAGE`/terminal `AGENT_STATE`) flushes, then replaces the text with
-the finalized model message exactly once. Cancellation and error paths flush
-partially streamed text before appending their error line, then reset the
-coalescer so stale deltas cannot leak into the next run.
+`AGENT_TEXT_DELTA` → **`messageList.upsertStreamingLine` (the ONE
+accumulator)** → frame-batched paint → DOM.
+
+There is exactly **one** UI buffer and **one** scheduler:
+`streamText` is the source of truth in `messageList`, and
+`gui/src/streamCoalescer.ts` releases the accumulated chunks at most once per
+animation frame (`push` schedules a frame, `close()` cancels it and flushes
+synchronously, `reset()` discards without painting). The previous design had
+TWO independent ~110ms timer coalescers (one in `main.ts`, one in
+`messageList`), which is what made the reveal chunky and jumpy; the timer
+layer was removed, not shortened.
+
+Correctness rules: chunks are appended in arrival order and can never be
+dropped or duplicated (buffer cleared on paint); finalization closes the
+accumulator and then replaces the painted text with the finalized model
+message exactly once; terminal `AGENT_STATE` / `AGENT_ERROR` flush the partial
+text so cancellation and errors preserve output; conversation switches use
+`reset()` so stale text cannot be painted into a cleared/replaced list; turn
+boundaries (thinking, tool call, command) call `endStreamingTurn()` (flush +
+fresh segment); `AGENT_TEXT_DELTA` is dropped when its `sessionId` is not the
+active conversation, so a stream cannot leak across conversations.
+
+No sequence numbers are needed: `RuntimeManager.publishEvent` is a synchronous
+emitter and `webview.postMessage` is ordered, so per-run deltas cannot
+reorder.
 
 ### Agent activity blocks & artifacts (2026-09-27)
 - **Thinking block:** `AGENT_THINKING` upserts one live status element
@@ -498,11 +572,17 @@ compress content). Section state: `AppState.settingsSection`.
   composer) and posts `NEW_SESSION`; `MessageRouter` **reuses the active
   session while its transcript is still empty** (dedupe against New-click
   spam), else `createSession`.
-- Loading history: History page → `SELECT_SESSION` + `GET_TRANSCRIPT` →
-  `TRANSCRIPT` message → `replaceAll`. Stale-guard
-  (`loadedTranscriptSessionId`) prevents an old transcript from overwriting
-  the active view; the optimistic reset re-points the guard *before*
+- Loading history: `GET_TRANSCRIPT` → `TRANSCRIPT` message → `replaceAll`
+  (sent for the active conversation after a restart / session adoption).
+  Stale-guard (`loadedTranscriptSessionId`) prevents an old transcript from
+  overwriting  the active view; the optimistic reset re-points the guard *before*
   requesting.
+- **History UI removed (2026-09-29):** the chat UI no longer exposes history
+  navigation (header button, History page, session dropdown, `SHOW_HISTORY`
+  message, `showHistory()` are all gone). `SessionStore`, `TranscriptStore`,
+  session restore, transcript persistence and delete-message persistence are
+  untouched — the backend keeps every conversation; only the UI surface was
+  removed. The `SELECT_SESSION` protocol message is still handled host-side.
 - Concepts kept separate: active conversation state (GUI), provider/session
   runtime state (RuntimeManager), historical records (SessionStore +
   TranscriptStore). Do not merge them.
@@ -513,10 +593,21 @@ compress content). Section state: `AppState.settingsSection`.
   `VSCodeSecretStorageAdapter`.
 - `src/auth/cursorAuthProvider.ts` / `cursorClient.ts` / `cursorConnection.ts`
   — Cursor path (auth provider id `codeviaCursor`); legacy but maintained.
-- OpenRouter key: SecretStorage key `codeviaCursor.openrouter.key`; stored on
-  CONNECT_OPENROUTER, deleted on DISCONNECT; re-attached at activation by
-  `extension.ts` when a saved OpenRouter provider config exists.
-- Provider config (non-secret): `ProviderConfigStore` (see §3).
+- **Provider credentials (2026-09-29):** `src/auth/providerCredentials.ts` —
+  `createProviderCredentialStore(secrets, { legacySecretKeys })` resolves a
+  secret per **profile id** under
+  `codeviaCursor.provider.<profileId>.apiKey`. Nothing in the host branches on
+  provider when handling credentials; the profile id is the only key.
+- Legacy `codeviaCursor.openrouter.key` is the migration source for the
+  `openrouter-default` profile: `get` falls back to it, and the first
+  `store`/`delete` migrates it away (dual handling lives in the legacy map
+  passed at construction, not in provider-specific code).
+- CONNECT_OPENROUTER stores into the active OpenRouter profile; DISCONNECT
+  deletes the profile slot and the legacy key.
+- Provider profiles (non-secret): `ProviderConfigStore` (see §3).
+- Startup hydration order: profile store → credential resolution →
+  `RuntimeManager.completeRestore` → sanitized `RUNTIME_STATUS` to the webview.
+  The webview never loads or receives a secret.
 - **Never** expose secrets to the GUI, logs, URLs, or error messages (tests
   assert this for OpenRouter). Never persist API keys in Memento/globalState.
 
@@ -541,9 +632,19 @@ compress content). Section state: `AppState.settingsSection`.
 - SSE streaming → `runtime/openaiCompatible/sseStream.test.ts` (delta
   assembly, tool-fragment merging + id preservation, tool-JSON never in
   deltas, stream:true/false gating, OpenRouter round-trip).
-- Streaming UX coalescing → `gui/streamCoalescer.test.ts` (cadence batching,
-  immediate first paint, idle rescheduling, single final flush, cancellation),
-  using a fake scheduler — no real timers in tests.
+- Streaming UX batching → `gui/streamCoalescer.test.ts` (one paint per frame,
+  arrival order preserved, no dropped/duplicated text, `close()` cancels the
+  pending frame and flushes once, `reset()` discards without painting), using
+  fake animation frames — no real timers in tests.
+- Provider profiles / credentials → `session/providerConfigStore.test.ts`
+  (profile save/activate/remove, legacy single-slot migration, non-secret
+  metadata round-trip, credential-backed restore), `auth/providerCredentials.test.ts`
+  (namespaced keys, per-profile isolation, legacy fallback + migration on
+  write, delete removes both, empty values treated as absent) and
+  `webview/messageRouter.providerProfiles.test.ts` (connect writes the
+  profile-scoped key and clears the legacy one, credential re-hydration after
+  a restart, legacy-only key still works, disconnect removes both, no secret
+  in any HostToGui payload).
 - Message actions → `runtime/runtimeManager.messageActions.test.ts`
   (assistant id stamping, user id from composer, durable delete, plus the
   guard that every run uses agent mode and the default tool set contains every
@@ -564,6 +665,18 @@ compress content). Section state: `AppState.settingsSection`.
   (chunk hook + unchanged non-streaming result) and
   `runtime/runtimeManager.commandStream.test.ts` (partial events while a
   command runs).
+- Tool system (Phase 1, 2026-09-29) → `test/unit/runtime/tools/`:
+  `pathSafety.test.ts` (traversal, symlink escape, safe fallback),
+  `readMultipleFiles.test.ts` (ordering, partial failure, file/byte caps,
+  binary, cancellation, malformed input), `grepSearch.test.ts` (plain/regex,
+  case, invalid regex, result cap, binary + ignored dirs, glob filter,
+  traversal, no shell), `globSearch.test.ts` (basic/nested glob, braces,
+  classes, caps, ignores, escapes), `diagnosticsTool.test.ts` (scopes, caps,
+  normalization + redaction through the shared collector,
+  dependency_unavailable), `gitStatusTool.test.ts` (porcelain parsing, real
+  repo states, missing git, not-a-repo, timeout, cancellation) and
+  `toolRegistry.extended.test.ts` (registry invariants, duplicate guard,
+  generated schemas, progress copy, structured router errors, cancellation).
 - **What to test when touching a subsystem:**
   - agent loop → `inferenceAgentLoop.test.ts` + `thinkingSafety` +
     `invalidToolRecovery` (add tool-id lifecycle cases there or in
@@ -623,10 +736,39 @@ compress content). Section state: `AppState.settingsSection`.
 22. The model chooses tools from the registered schemas it is sent. Never
     require the user to pick a tool or a mode; the agent loop, not the UI,
     decides what set the model may choose from.
+23. There is exactly ONE UI streaming buffer and ONE scheduler
+    (`messageList.streamText` + the rAF frame batcher in
+    `gui/src/streamCoalescer.ts`). Never add a second coalescer/accumulator in
+    `main.ts` or anywhere upstream — two buffering layers is what made
+    streaming look chunky. Rendering must never be driven by fixed timers.
+24. Credentials are addressed by provider **profile id**, never by provider
+    name: no `if (provider === "x") store the secret here`. New providers get a
+    profile (via `profileIdFor`) and their secret automatically lives at
+    `codeviaCursor.provider.<profileId>.apiKey` in SecretStorage.
+25. The chat UI exposes no history navigation (no History page/button, no
+    session dropdown, no `SHOW_HISTORY`). Do not delete `SessionStore`,
+    `TranscriptStore`, session restore, transcript persistence or durable
+    message deletion to "clean up" after that removal — persistence is a
+    backend concern and stays.
+26. Adding a tool means adding ONE registry entry (contract + `summarize` +
+    validation) plus one executor branch — never a branch in
+    `inferenceAgentLoop`. Tools throw `ToolExecutionError` with a code from
+    `toolError.ts` instead of raw errors, resolve every path through
+    `workspacePath.ts`, and a bounded tool reports `{ truncated: true,
+    reason }` rather than silently dropping results.
+27. Inspection tools stay read-only: `git_status` and `get_diagnostics` must
+    never modify the repository or trigger a build, and their output is
+    normalized/redacted before it reaches the model.
 
 ## 15. Known Bugs / Limitations
 
 ### Fixed
+- **Transcript writes were not durable at the end of a run:** appends are
+  queued per event and were never awaited, so a transcript read immediately
+  after `startTask` could observe a half-persisted run (flaky tests, and a
+  real risk of losing the last entries on shutdown). Fixed by adding
+  `TranscriptStore.flush(sessionId)` and awaiting it in `startTask`'s
+  `finally` (2026-09-29).
 - **Registered tools reported as "Unknown tool" (autonomous tool use broken):**
   a composer Code/Ask/Plan selector made `DEFAULT_AGENT_MODE`
   user-controllable, so a read-only selection removed `write_file`,
@@ -645,7 +787,15 @@ compress content). Section state: `AppState.settingsSection`.
   new `toOpenAiMessages` serializer; regression tests added. (2026-09-26)
 - **Provider settings not restored on restart:** added
   `ProviderConfigStore` + `restoreProviderConfig` + OpenRouter key
-  re-attach from SecretStorage.
+  re-attach from SecretStorage (2026-09-26); generalized into profiles +
+  per-profile credentials on 2026-09-29 (see §12).
+- **Chunky/jumpy streaming text:** two independent ~110ms timer coalescers
+  buffered the same stream (one in `main.ts`, one in `messageList`). Fixed by
+  removing the upstream coalescer entirely and making the remaining one an
+  animation-frame batcher over a single accumulator (2026-09-29).
+- **Stale stream text resurrected into a cleared list:** `clear()`/`replaceAll`
+  reset the stream by flushing, which painted pending text into the
+  already-emptied list. Fixed with a non-flushing `reset()` (2026-09-29).
 - **Intermittently unclickable UI:** per-token `replaceAll` rebuilt DOM
   under the pointer. Fixed with in-place streaming/upserts + rAF batching.
 - **"New" conversation only appeared after first message:** stale-transcript
@@ -667,6 +817,9 @@ compress content). Section state: `AppState.settingsSection`.
   titles yet.
 
 ### Architectural Risks
+- Tool search runs in-process (no ripgrep/native backend yet) and does not
+  honor `.gitignore` — it uses a built-in ignore set. Both are intentional for
+  Phase 1 and are the top Phase 2 candidates.
 - `gui/src/protocol.ts` and `src/webview/types.ts` can drift (manual sync).
 - `ChatTurn` shape changes must update both runtimes and the serializer —
   TypeScript catches most, but runtime id semantics are only test-enforced.
@@ -675,6 +828,20 @@ compress content). Section state: `AppState.settingsSection`.
 
 ## 16. Important Historical Decisions
 
+- **Provider profiles, not provider branches (2026-09-29)** — Roo Code and
+  Continue were studied as references (profiles + an active profile id;
+  non-secret config separated from credential resolution; secrets only in the
+  OS/editor secret store; state hydrated by the host). Spider adopted the
+  *principles* and kept its own architecture: the existing
+  `ProviderConfigStore` grew profile support instead of a second store, a
+  generic `ProviderCredentialStore` keys secrets by profile id so no code
+  branches on provider, and React/esbuild/config-file formats were
+  deliberately NOT adopted. Legacy keys are migrated, never dropped.
+- **No sequence numbers for stream ordering (2026-09-29)** — inspection showed
+  a single synchronous `RuntimeManager.publishEvent` emitter plus ordered
+  `postMessage`, so deltas cannot reorder. Adding ordering machinery would be
+  speculative; this decision should be revisited only if an async event source
+  is introduced.
 - **OpenRouter composes OpenAICompatibleRuntime** — one wire-format
   implementation, catalog logic stays separate; avoids a second chat client.
 - **One shared provider-independent agent loop** — lifecycle/safety fixed in
@@ -691,13 +858,16 @@ compress content). Section state: `AppState.settingsSection`.
   the model history and the user-visible history decoupled.
 - **In-place GUI updates** — the message list mutates instead of rebuilding;
   fixes both click reliability and streaming performance.
-- **Two-layer streaming coalescing (2026-09-27)** — deltas are never painted
-  per token or per event. The GUI controller coalesces host deltas on a
-  ~110ms cadence (`gui/src/streamCoalescer.ts`, injectable scheduler for
-  deterministic tests), and the message list accumulates chunks into ONE text
-  node (append + repaint, never rebuild). The first chunk paints immediately
-  (no start latency); idle gaps cancel the timer; `close()` flushes the tail
-  exactly once, so finalization cannot duplicate text.
+- **One streaming accumulator, frame-batched (2026-09-29)** — deltas are
+  never painted per token or per event, and there is only one buffer
+  (`messageList.streamText`) and one scheduler
+  (`gui/src/streamCoalescer.ts`, an rAF frame batcher with an injectable
+  scheduler for deterministic tests). Chunks are appended in order and painted
+  at most once per animation frame; `close()` cancels the pending frame and
+  flushes the tail exactly once (finalization cannot duplicate text);
+  `reset()` discards pending text without painting (used when the list is
+  cleared/replaced). Two competing timer coalescers existed before and are
+  gone — that was the cause of the chunked/jumpy reveal.
 - **Turn boundaries reset the stream segment** — thinking blocks, tool calls,
   and command blocks call `endStreamingTurn()` (flush + fresh accumulator),
   so assistant text before/after a tool block are separate lines and tool
@@ -750,6 +920,26 @@ compress content). Section state: `AppState.settingsSection`.
   (Models / Agent Behaviour / Auto Approve / Indexing / About Spider);
   `AUTO_APPROVE_STATE` / `PERMISSION_RULES` / `EXTENSION_INFO` protocol
   messages; session-terminology sweep in chat UI.
+- **Completed (2026-09-29, Phase 1 tool system):** five new read-only tools
+  (`read_multiple_files`, `grep_search`, `glob_search`, `get_diagnostics`,
+  `git_status`) added through the existing registry (recursive schemas,
+  registry-owned progress copy, duplicate guard) with shared
+  error/path/search/diagnostics building blocks, typed error codes, hard
+  resource limits with truncation reporting, cancellation support, structured
+  tool logging, and a real transcript-flush durability fix. 426 unit tests /
+  56 files, lint 0 warnings, typecheck + compile green.
+- **Completed (2026-09-29, streaming + provider profiles + chat chrome):**
+  single-accumulator frame-batched streaming (upstream 110ms coalescer
+  deleted; non-flushing `reset()` for list resets); provider **profile**
+  system (`ProviderProfile` + `activeProfileId` in the existing
+  `ProviderConfigStore`, legacy single-slot key migrated and still projected);
+  generic per-profile credential store
+  (`codeviaCursor.provider.<profileId>.apiKey`) with legacy OpenRouter key
+  migration; generalized startup hydration
+  (`restoreProviderConfig` → credential → `completeRestore`, no provider branch
+  in `extension.ts`); composer Send anchored inside a structural
+  `composer-input` wrapper; History UI removed from the chat (persistence
+  untouched). 349 unit tests, lint 0 warnings, typecheck + compile green.
 - **Completed (2026-09-28, chat UI redesign):** Copy/Delete message actions
   with stable ids (composer-generated user ids, host-generated assistant ids)
   and durable transcript deletion; collapsible tool/command output; composer
@@ -758,10 +948,15 @@ compress content). Section state: `AppState.settingsSection`.
   (see §15 Fixed) because it gated registered tools out of the model's
   available set.
 - **Current:** documentation/context (this file). All checks green:
-  typecheck, lint (0 warnings), 332 unit tests, compile.
-- **Next planned:** per-conversation titles; collapsible exec boxes;
-  workspace indexing (reserved Settings section exists, honestly marked);
-  agent behaviour settings if/when the backend supports them.
+  typecheck, lint (0 warnings), 426 unit tests, compile.
+- **Next planned (Phase 2 tools):** git diff/log tools, watch/list symbols,
+  a native (ripgrep-style) search backend behind the existing search module,
+  `.gitignore` support in the walker, and a web/network tool with the same
+  permission + limit discipline. Also: per-conversation titles; a profile manager UI (the
+  backend already supports multiple profiles; Settings exposes one connection
+  per provider today); workspace indexing (reserved Settings section exists,
+  honestly marked); agent behaviour settings if/when the backend supports
+  them.
 - **Blockers:** none known.
 
 ## 18. AI Agent Instructions
