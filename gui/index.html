@@ -1,19 +1,22 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; img-src {{cspSource}} data:;">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; img-src {{cspSource}} data:;">
   <title>Spider</title>
   <link rel="stylesheet" href="{{styleUri}}">
 </head>
+
 <body>
   <div id="app">
     <header class="app-header">
       <div class="brand">Spider</div>
       <div id="runtime-pill" class="runtime-pill">Cursor</div>
-      <button id="history-btn" class="icon-btn" type="button" aria-label="Open Spider history" title="History">History</button>
-      <button id="settings-btn" class="icon-btn" type="button" aria-label="Open Spider settings" title="Settings">Settings</button>
+      <button id="settings-btn" class="icon-btn" type="button" aria-label="Open Spider settings"
+        title="Settings">Settings</button>
     </header>
 
     <main id="chat-view" class="view">
@@ -22,17 +25,6 @@
       <div id="message-list" class="message-list"></div>
       <div id="composer" class="composer"></div>
     </main>
-
-    <section id="history-view" class="view" hidden>
-      <div class="settings-heading">
-        <div>
-          <h1>History</h1>
-          <p class="hint">Previous conversations. Open one to continue where you left off.</p>
-        </div>
-        <button id="history-back" class="btn btn-ghost" type="button">Back to chat</button>
-      </div>
-      <div id="history-list" class="history-list"></div>
-    </section>
 
     <section id="settings-view" class="view settings-view" hidden>
       <div class="settings-heading">
@@ -49,4 +41,5 @@
   <script nonce="{{nonce}}" src="{{scriptUri}}" data-spider-logo="{{logoUri}}"></script>
   <meta name="spider-logo" content="{{logoUri}}">
 </body>
+
 </html>
