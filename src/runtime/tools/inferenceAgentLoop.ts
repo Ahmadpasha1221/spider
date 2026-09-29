@@ -9,7 +9,7 @@ import { buildAgentSystemPrompt, stripToolCallMarkup } from "./localToolDefiniti
 import { parseFallbackToolOutput } from "./textToolFallback";
 import { parseNativeToolOutput, type InvalidToolMention, type ParsedToolOutput } from "./parseToolCalls";
 import { availableToolNames, DEFAULT_AGENT_MODE, type AgentMode } from "./toolAvailability";
-import { buildFallbackToolContract } from "./toolRegistry";
+import { buildFallbackToolContract, getRegisteredTool } from "./toolRegistry";
 
 export interface ChatToolCall {
   id: string;
@@ -277,34 +277,19 @@ function invalidToolFeedback(invalid: readonly InvalidToolMention[], allowedTool
   ].join("\n");
 }
 
-/** Safe, user-facing progress lines. Never exposes hidden reasoning. */
+/**
+ * Safe, user-facing progress lines. Never exposes hidden reasoning.
+ *
+ * The copy lives on the tool definition (`RegisteredTool.summarize`), so the
+ * loop has no per-tool branches and a new tool brings its own wording.
+ */
 export function describeToolStart(call: RuntimeToolCall): string {
-  const input = isRecord(call.input) ? call.input : {};
-  const path = typeof input.path === "string" ? input.path : undefined;
-  switch (call.name) {
-    case "list_files":
-      return "Inspecting the workspace…";
-    case "read_file":
-      return path ? `Reading ${path}…` : "Reading file…";
-    case "search_files":
-      return typeof input.query === "string" ? `Searching for "${input.query}"…` : "Searching the workspace…";
-    case "write_file":
-      return path ? `Creating ${path}…` : "Creating file…";
-    case "edit_file":
-      return path ? `Updating ${path}…` : "Updating file…";
-    case "create_directory":
-      return path ? `Creating folder ${path}…` : "Creating folder…";
-    case "move_file":
-      return typeof input.from === "string" ? `Moving ${input.from}…` : "Moving file…";
-    case "delete_file":
-      return path ? `Deleting ${path}…` : "Deleting file…";
-    case "run_command":
-      return typeof input.command === "string" ? `Running: ${input.command}` : "Running command…";
-    case "finish":
-      return "Finishing…";
-    default:
-      return `Using ${call.name}…`;
+  const tool = getRegisteredTool(call.name);
+  if (!tool) {
+    return `Using ${call.name}…`;
   }
+  const input = isRecord(call.input) ? call.input : {};
+  return tool.summarize(input);
 }
 
 function describeToolProblem(call: RuntimeToolCall): string {

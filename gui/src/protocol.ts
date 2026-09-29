@@ -112,7 +112,6 @@ export type HostToGui =
   | { type: "LOCAL_MODELS"; provider: LocalProvider; models: LocalModel[]; error?: string }
   | { type: "OPENROUTER_MODELS"; models: ModelInfo[]; error?: string }
   | { type: "SHOW_SETTINGS" }
-  | { type: "SHOW_HISTORY" }
   | {
       type: "TRANSCRIPT";
       sessionId: string;
