@@ -7,6 +7,8 @@ import { RuntimeManager } from "../runtime/runtimeManager";
 import type { FileChangeSummary, RuntimeEvent, RuntimeModel, RuntimeProviderConfig } from "../runtime/runtimeTypes";
 import { DEFAULT_OLLAMA_BASE_URL } from "../runtime/ollama/ollamaRuntime";
 import type { SecretStorage } from "../auth/secretStorage";
+import { createProviderCredentialStore, type ProviderCredentialStore } from "../auth/providerCredentials";
+import { profileIdFor } from "../session/providerConfigStore";
 import type { PermissionManager } from "../permissions/permissionManager";
 import { isPermissionRule, isPermissionRuleCategory } from "./permissionRules";
 import { EXTENSION_VERSION, OPENROUTER_API_KEY_SECRET_KEY } from "../shared/constants";
@@ -23,6 +25,12 @@ import {
 export class MessageRouter {
   /** Optional late-bound permission manager (tests, non-extension contexts). */
   private permissionManager?: PermissionManager;
+  /**
+   * Per-profile credential access. Secrets stay in SecretStorage under a key
+   * derived from the profile id; the webview only ever sees connection state.
+   * The legacy single OpenRouter key is migrated on first write/delete.
+   */
+  private readonly providerCredentials?: ProviderCredentialStore;
 
   constructor(
     private readonly agentManager: AgentManager,
@@ -30,10 +38,15 @@ export class MessageRouter {
     private readonly connection?: CursorConnection,
     private readonly cursorClient?: CursorClient,
     private readonly runtimeManager?: RuntimeManager,
-    private readonly openRouterSecrets?: SecretStorage,
+    openRouterSecrets?: SecretStorage,
     dependencies?: { permissionManager?: PermissionManager },
   ) {
     this.permissionManager = dependencies?.permissionManager;
+    this.providerCredentials = openRouterSecrets
+      ? createProviderCredentialStore(openRouterSecrets, {
+          legacySecretKeys: { [profileIdFor("openrouter")]: OPENROUTER_API_KEY_SECRET_KEY },
+        })
+      : undefined;
   }
 
   setPermissionManager(permissionManager: PermissionManager): void {
@@ -212,21 +225,19 @@ export class MessageRouter {
         return this.connection.connect(typed.apiKey);
       }
       case "CONNECT_OPENROUTER": {
-        if (!this.runtimeManager || !this.openRouterSecrets) {
+        if (!this.runtimeManager || !this.providerCredentials) {
           return { type: "RUNTIME_STATUS", provider: "openrouter", connected: false, error: "OpenRouter is not configured." } as ExtensionMessage;
         }
         const apiKey = typed.apiKey.trim();
         if (apiKey.length === 0) {
           return { type: "RUNTIME_STATUS", provider: "openrouter", connected: false, error: "Enter an OpenRouter API key first." } as ExtensionMessage;
         }
-        await this.openRouterSecrets.store(OPENROUTER_API_KEY_SECRET_KEY, apiKey);
+        await this.providerCredentials.store(this.openRouterProfileId(), apiKey);
         await this.connectOpenRouter(apiKey);
         return this.openRouterStatus();
       }
       case "DISCONNECT_OPENROUTER": {
-        if (this.openRouterSecrets) {
-          await this.openRouterSecrets.delete(OPENROUTER_API_KEY_SECRET_KEY);
-        }
+        await this.providerCredentials?.delete(this.openRouterProfileId());
         return this.openRouterStatus();
       }
       case "DISCONNECT_CURSOR": {
@@ -497,12 +508,18 @@ export class MessageRouter {
     return {};
   }
 
+  /** Profile id of the active OpenRouter connection (defaults to the shared one). */
+  private openRouterProfileId(): string {
+    const config = this.runtimeManager?.getProviderConfig();
+    return config?.provider === "openrouter" && config.profileId ? config.profileId : profileIdFor("openrouter");
+  }
+
   private async resolveOpenRouterApiKey(): Promise<string | undefined> {
     const config = this.runtimeManager?.getProviderConfig();
     if (config?.provider === "openrouter" && config.apiKey) {
       return config.apiKey;
     }
-    return this.openRouterSecrets?.get(OPENROUTER_API_KEY_SECRET_KEY);
+    return this.providerCredentials?.get(this.openRouterProfileId());
   }
 
   private openRouterStatus(error?: string): ExtensionMessage {
