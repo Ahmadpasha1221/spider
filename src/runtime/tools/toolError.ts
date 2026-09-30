@@ -30,6 +30,10 @@ export type ToolErrorCode =
   | "too_large"
   /** A result budget (files/bytes/results) was exhausted. */
   | "budget_exceeded"
+  /** A network request failed to complete (DNS, connection, TLS). */
+  | "network_error"
+  /** A security policy rejected the request (SSRF/private-address block). */
+  | "security_rejected"
   /** Anything else: a bug or an unmapped host failure. */
   | "internal_error";
 

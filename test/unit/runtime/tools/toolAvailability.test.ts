@@ -31,6 +31,26 @@ describe("tool availability (current available-tool set)", () => {
       "glob_search",
       "get_diagnostics",
       "git_status",
+      "git_diff",
+      "git_log",
+      "get_active_file",
+      "get_selection",
+      "background_command",
+      "get_command_output",
+      "kill_command",
+      "ask_user",
+      "update_todo",
+      "fetch_url",
+      "search_web",
+      "codebase_search",
+      "repo_map",
+      "git_show",
+      "git_blame",
+      "list_symbols",
+      "go_to_definition",
+      "find_references",
+      "get_problems",
+      "run_tests",
       "finish",
     ]);
   });
@@ -38,9 +58,15 @@ describe("tool availability (current available-tool set)", () => {
   it("includes the read-only Phase 1 tools in read-only modes", () => {
     for (const mode of ["ask", "plan"] as const) {
       const tools = availableToolNames(mode);
-      for (const name of ["read_multiple_files", "grep_search", "glob_search", "get_diagnostics", "git_status"]) {
+      for (const name of ["read_multiple_files", "grep_search", "glob_search", "get_diagnostics", "git_status", "git_diff", "git_log", "get_active_file", "get_selection", "ask_user", "update_todo", "codebase_search", "repo_map", "git_show", "git_blame", "list_symbols", "go_to_definition", "find_references", "get_problems"]) {
         expect(tools).toContain(name);
       }
+      // Process and network capabilities stay out of read-only modes.
+      expect(tools).not.toContain("fetch_url");
+      expect(tools).not.toContain("get_command_output");
+      expect(tools).not.toContain("kill_command");
+      expect(tools).not.toContain("search_web");
+      expect(tools).not.toContain("run_tests");
     }
   });
 
@@ -58,6 +84,11 @@ describe("tool availability (current available-tool set)", () => {
       expect(tools).not.toContain("run_command");
       expect(tools).not.toContain("create_directory");
       expect(tools).not.toContain("move_file");
+      expect(tools).not.toContain("background_command");
+      expect(tools).not.toContain("fetch_url");
+      expect(tools).not.toContain("kill_command");
+      expect(tools).not.toContain("search_web");
+      expect(tools).not.toContain("run_tests");
     }
   });
 

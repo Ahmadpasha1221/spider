@@ -13,6 +13,23 @@ import { gitLog } from "./gitLogTool";
 import type { EditorContextSource } from "../editor/editorContextSource";
 import { getActiveFile, getSelection } from "./editorTools";
 import { BackgroundProcessManager } from "./backgroundProcessManager";
+import { getCommandOutput, killCommand } from "./processTools";
+import { askUser } from "./askUserTool";
+import { updateTodo } from "./todoTool";
+import { fetchUrl } from "./fetchUrlTool";
+import { searchWeb } from "./searchWebTool";
+import { codebaseSearch } from "./codebaseSearchTool";
+import { repoMap } from "./repoMapTool";
+import { gitShow } from "./gitShowTool";
+import { gitBlame } from "./gitBlameTool";
+// ---- Phase 5 imports ---------------------------------------------------------
+import { listSymbols } from "./symbolTools";
+import { findReferences, goToDefinition } from "./navigationTools";
+import { getProblems } from "./problemsTool";
+import { runTests } from "./runTestsTool";
+import type { LanguageSource } from "../lsp/languageSource";
+import type { HostResolver } from "../net/urlSecurity";
+import type { WebSearchProvider } from "../net/webSearchProvider";
 import type { DiagnosticsSource } from "../diagnostics/diagnosticsSource";
 import { ToolExecutionError } from "./toolError";
 import { isProbablyBinary, SEARCH_LIMITS, walkWorkspace } from "./workspaceSearch";
@@ -29,6 +46,13 @@ export interface WorkspaceToolExecutorOptions {
   readonly editor?: EditorContextSource;
   /** Overridable background-process manager (tests, alternative hosts). */
   readonly backgroundProcesses?: BackgroundProcessManager;
+  /** Overridable network access for fetch_url (tests, alternative hosts). */
+  readonly fetch?: typeof fetch;
+  readonly resolveHost?: HostResolver;
+  /** Web-search provider for search_web (absent when no provider is configured). */
+  readonly webSearch?: WebSearchProvider;
+  /** Language intelligence (symbols/definition/references) for Phase 5 tools. */
+  readonly language?: LanguageSource;
 }
 
 export class WorkspaceToolExecutor implements RuntimeToolExecutor {
@@ -36,12 +60,20 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
   private readonly git: GitCommandRunner;
   private readonly editor?: EditorContextSource;
   private readonly backgroundProcesses: BackgroundProcessManager;
+  private readonly fetchFn?: typeof fetch;
+  private readonly resolveHost?: HostResolver;
+  private readonly webSearch?: WebSearchProvider;
+  private readonly language?: LanguageSource;
 
   constructor(options: WorkspaceToolExecutorOptions = {}) {
     this.diagnostics = options.diagnostics;
     this.git = options.git ?? createGitCommandRunner();
     this.editor = options.editor;
     this.backgroundProcesses = options.backgroundProcesses ?? new BackgroundProcessManager();
+    this.fetchFn = options.fetch;
+    this.resolveHost = options.resolveHost;
+    this.webSearch = options.webSearch;
+    this.language = options.language;
   }
 
   async execute(call: RuntimeToolCall, context: RuntimeToolExecutorContext): Promise<unknown> {
@@ -146,6 +178,81 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
         return getSelection(input, { editor: this.editor });
       case "background_command":
         return this.startBackgroundCommand(workspacePath, input, context.signal);
+      case "get_command_output":
+        return getCommandOutput(input, this.backgroundProcesses);
+      case "kill_command":
+        return killCommand(input, this.backgroundProcesses);
+      case "ask_user":
+        return askUser(input, context.session.sessionId, {
+          ...(context.askUser ? { askUser: context.askUser } : {}),
+        });
+      case "update_todo":
+        return updateTodo(input, { ...(context.taskPlan ? { taskPlan: context.taskPlan } : {}) });
+      case "fetch_url":
+        return fetchUrl(
+          input,
+          { ...(context.signal ? { signal: context.signal } : {}) },
+          {
+            ...(this.fetchFn ? { fetchFn: this.fetchFn } : {}),
+            ...(this.resolveHost ? { resolveHost: this.resolveHost } : {}),
+          },
+        );
+      case "search_web":
+        return searchWeb(
+          input,
+          { ...(context.signal ? { signal: context.signal } : {}) },
+          { ...(this.webSearch ? { provider: this.webSearch } : {}) },
+        );
+      case "codebase_search":
+        return codebaseSearch(input, {
+          workspacePath,
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+      case "repo_map":
+        return repoMap(input, {
+          workspacePath,
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+      case "git_show":
+        return gitShow(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          this.git,
+        );
+      case "git_blame":
+        return gitBlame(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          this.git,
+        );
+      case "list_symbols":
+        return listSymbols(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          { ...(this.language ? { language: this.language } : {}) },
+        );
+      case "go_to_definition":
+        return goToDefinition(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          { ...(this.language ? { language: this.language } : {}) },
+        );
+      case "find_references":
+        return findReferences(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          { ...(this.language ? { language: this.language } : {}) },
+        );
+      case "get_problems":
+        return getProblems(
+          input,
+          { workspacePath, ...(context.signal ? { signal: context.signal } : {}) },
+          { ...(this.diagnostics ? { diagnostics: this.diagnostics } : {}) },
+        );
+      case "run_tests":
+        return runTests(input, { workspacePath, ...(context.signal ? { signal: context.signal } : {}) }, {
+          backgroundProcesses: this.backgroundProcesses,
+        });
       default:
         throw new ToolExecutionError("invalid_input", `Unknown tool: ${name}`);
     }
@@ -308,21 +415,16 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     if (command.startsWith("-")) {
       throw new ToolExecutionError("invalid_input", "command must not start with '-'.");
     }
-    if (argsPopped.some((arg) => arg && arg.startsWith("-") && arg.length > 1)) {
-      throw new ToolExecutionError(
-        "invalid_input",
-        "args must not start with '-' (to avoid option confusion, pass explicit helper args).",
-      );
-    }
-
     const cwd = await resolveWorkspacePathSafe(workspacePath, requestedCwd && requestedCwd.length > 0 ? requestedCwd : ".");
+
+    const relativeCwd = toWorkspaceRelativePath(workspacePath, cwd) || ".";
 
     if (signal?.aborted) {
       return {
         processId: "",
         command,
         args: argsPopped,
-        cwd: toWorkspaceRelativePath(workspacePath, cwd),
+        cwd: relativeCwd,
         status: "cancelled",
         message: "Process start was cancelled.",
       };
@@ -340,7 +442,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       processId: started.processId,
       command: started.command,
       args: started.args,
-      cwd: toWorkspaceRelativePath(workspacePath, started.cwd),
+      cwd: relativeCwd,
       status: started.status,
       ...(started.pid !== undefined ? { pid: started.pid } : {}),
       ...(started.exitCode !== undefined ? { exitCode: started.exitCode } : {}),
