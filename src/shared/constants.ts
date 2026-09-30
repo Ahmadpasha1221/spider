@@ -16,6 +16,12 @@ export const OPENROUTER_API_KEY_SECRET_KEY = "codeviaCursor.openrouter.key";
 
 export const BRAND_COLOR = "#7C3AED";
 
+/**
+ * SecretStorage key for the web-search provider API key used by search_web.
+ * Read lazily by the provider on every call; never logged or sent to the GUI.
+ */
+export const WEB_SEARCH_API_KEY_SECRET_KEY = "codeviaCursor.webSearch.apiKey";
+
 export const PERMISSION_DEFAULT_TIMEOUT_MS = 120000;
 
 export const DESTRUCTIVE_CONFIRMATIONS: ReadonlySet<string> = new Set([

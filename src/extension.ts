@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { COMMANDS, EXTENSION_NAME, OPENROUTER_API_KEY_SECRET_KEY } from "./shared/constants";
+import { COMMANDS, EXTENSION_NAME, OPENROUTER_API_KEY_SECRET_KEY, WEB_SEARCH_API_KEY_SECRET_KEY } from "./shared/constants";
 import { Logger } from "./utils/logger";
 import { CursorAuthProvider } from "./auth/cursorAuthProvider";
 import { VSCodeSecretStorageAdapter } from "./auth/secretStorage";
@@ -22,7 +22,9 @@ import { OpenRouterRuntime } from "./runtime/openrouter/openRouterRuntime";
 import { WorkspaceToolExecutor } from "./runtime/tools/workspaceToolExecutor";
 import { createVSCodeDiagnosticsSource } from "./runtime/diagnostics/diagnosticsSource";
 import { createVSCodeEditorContextSource } from "./runtime/editor/editorContextSource";
+import { createVSCodeLanguageSource } from "./runtime/lsp/languageSource";
 import { BackgroundProcessManager } from "./runtime/tools/backgroundProcessManager";
+import { createStoredWebSearchProvider } from "./runtime/net/webSearchProvider";
 import { DiffViewService } from "./runtime/review/diffView";
 
 const logger = new Logger(EXTENSION_NAME, "INFO");
@@ -76,14 +78,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const transcriptStore = new TranscriptStore(context.globalStorageUri);
   const agentManager = new AgentManager(cursorClient, sessionStore, permissionManager, transcriptStore);
   const diffView = new DiffViewService();
+  // One background-process manager owns every background_command process: the
+  // executor starts them, RuntimeManager disposes them on deactivate.
+  const backgroundProcesses = new BackgroundProcessManager();
+  // search_web resolves its provider credential from SecretStorage lazily, so
+  // no key is read (or held) until the tool is actually used.
+  const webSearch = createStoredWebSearchProvider({
+    secretStorage,
+    secretKey: WEB_SEARCH_API_KEY_SECRET_KEY,
+  });
+  const toolExecutor = new WorkspaceToolExecutor({
+    diagnostics: createVSCodeDiagnosticsSource(),
+    editor: createVSCodeEditorContextSource(),
+    language: createVSCodeLanguageSource(),
+    backgroundProcesses,
+    webSearch,
+  });
   const runtimeManager = new RuntimeManager({
     sessionStore,
     permissionManager,
     runtimes: [new OllamaRuntime(), new OpenAICompatibleRuntime(), new OpenRouterRuntime(), new MockRuntime()],
     logger,
-    // get_diagnostics reads the editor's current diagnostics; everything else
-    // in the executor is host-independent.
-    toolExecutor: new WorkspaceToolExecutor({ diagnostics: createVSCodeDiagnosticsSource() }),
+    toolExecutor,
+    backgroundProcesses,
     defaultWorkspacePath: getWorkspacePath(),
     transcriptStore,
     diffView,

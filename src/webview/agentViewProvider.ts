@@ -16,6 +16,7 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
   private messageSubscription?: vscode.Disposable;
   private eventSubscription?: vscode.Disposable;
   private runtimeSubscription?: vscode.Disposable;
+  private viewDisposeSubscription?: vscode.Disposable;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -69,6 +70,12 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
         this.postMessage(extensionMessage);
       }
       this.postSessionList();
+    });
+
+    // A disposed webview can never answer a pending `ask_user` question, so
+    // resolve them as cancelled instead of leaving promises hanging.
+    this.viewDisposeSubscription = webviewView.onDidDispose(() => {
+      this.runtimeManager?.cancelPendingUserQuestions();
     });
 
     this.postSessionList();
@@ -164,9 +171,11 @@ export class AgentViewProvider implements vscode.WebviewViewProvider, vscode.Dis
     this.messageSubscription?.dispose();
     this.eventSubscription?.dispose();
     this.runtimeSubscription?.dispose();
+    this.viewDisposeSubscription?.dispose();
     this.messageSubscription = undefined;
     this.eventSubscription = undefined;
     this.runtimeSubscription = undefined;
+    this.viewDisposeSubscription = undefined;
   }
 }
 
@@ -177,6 +186,8 @@ function shouldForwardResult(type: ExtensionMessage["type"]): boolean {
     || type === "LOCAL_MODELS"
     || type === "OPENROUTER_MODELS"
     || type === "TRANSCRIPT"
+    || type === "TODO_UPDATED"
+    || type === "USER_QUESTION_CLOSED"
   );
 }
 
