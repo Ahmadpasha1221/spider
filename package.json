@@ -2,7 +2,7 @@
   "name": "codevia-cursor",
   "displayName": "Spider",
   "version": "0.1.0",
-  "publisher": "codevia",
+  "publisher": "Ahmadpasha1221",
   "description": "A production-quality VS Code AI coding agent using the official Cursor TypeScript SDK.",
   "license": "MIT",
   "engines": {
@@ -145,10 +145,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/codevia/codevia-cursor"
+    "url": "https://github.com/Ahmadpasha1221/spider"
   },
   "bugs": {
-    "url": "https://github.com/codevia/codevia-cursor/issues"
+    "url": "https://github.com/Ahmadpasha1221/spider/issues"
   },
-  "homepage": "https://github.com/codevia/codevia-cursor#readme"
+  "homepage": "https://github.com/Ahmadpasha1221/spider#readme"
 }
