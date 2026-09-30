@@ -9,7 +9,18 @@ import type {
   PermissionRuleCategory,
   RuntimeProvider,
   SessionListItem,
+  TodoItemView,
+  UserQuestionOptionView,
 } from "./protocol";
+
+/** A pending `ask_user` question mirrored from the host (host-authoritative). */
+export interface PendingQuestion {
+  requestId: string;
+  question: string;
+  options?: UserQuestionOptionView[];
+  defaultOption?: string;
+  context?: string;
+}
 
 /**
  * The chat UI no longer exposes conversation-history navigation (persistence
@@ -99,6 +110,10 @@ export interface AppState {
   autoApproveScope: "conversation" | "runtime";
   permissionRules: Partial<Record<PermissionRuleCategory, PermissionRule>>;
   permissionRulesLoaded: boolean;
+  /** Task plan for the active conversation (sanitized; host-authoritative). */
+  todoItems: TodoItemView[];
+  /** Pending agent question, if any (host-authoritative). */
+  pendingQuestion?: PendingQuestion;
   extensionInfo?: ExtensionInfoView;
   /** Currently open section of the redesigned Settings page. */
   settingsSection: SettingsSection;
@@ -127,6 +142,8 @@ export function createInitialState(): AppState {
     autoApproveScope: "conversation",
     permissionRules: {},
     permissionRulesLoaded: false,
+    todoItems: [],
+    pendingQuestion: undefined,
     settingsSection: "models",
   };
 }
