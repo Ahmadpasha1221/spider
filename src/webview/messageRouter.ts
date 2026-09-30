@@ -121,10 +121,26 @@ export class MessageRouter {
       }
       case "SELECT_SESSION": {
         if (this.usesManagedRuntime() && this.runtimeManager) {
-          return { success: true, selected: this.runtimeManager.selectSession(typed.sessionId) };
+          const selected = this.runtimeManager.selectSession(typed.sessionId);
+          // A conversation switch also re-syncs its task plan (host-authoritative).
+          const plan = this.runtimeManager.getTaskPlan(typed.sessionId);
+          if (plan) {
+            return { type: "TODO_UPDATED", sessionId: plan.sessionId, items: plan.items.map(toTodoItemView) } as ExtensionMessage;
+          }
+          return { success: true, selected };
         }
         const selected = this.agentManager.selectSession(typed.sessionId);
         return { success: true, selected };
+      }
+      case "ANSWER_USER_QUESTION": {
+        // Stale/unknown request ids are a no-op: a late answer can never reach
+        // a future run, and the webview is told the question is closed.
+        this.runtimeManager?.resolveUserQuestion(typed.requestId, typed.answer);
+        return { type: "USER_QUESTION_CLOSED", requestId: typed.requestId } as ExtensionMessage;
+      }
+      case "CANCEL_USER_QUESTION": {
+        this.runtimeManager?.cancelUserQuestion(typed.requestId);
+        return { type: "USER_QUESTION_CLOSED", requestId: typed.requestId } as ExtensionMessage;
       }
       case "LIST_SESSIONS": {
         if (this.usesManagedRuntime() && this.runtimeManager) {
@@ -380,6 +396,23 @@ export class MessageRouter {
           command: event.request.command ?? event.request.toolName,
           category: event.request.category,
           destructive: event.request.destructive,
+        };
+      case "user_question":
+        return {
+          type: "USER_QUESTION",
+          requestId: event.request.requestId,
+          question: event.request.question,
+          ...(event.request.options ? { options: event.request.options.map((option) => ({ ...option })) } : {}),
+          ...(event.request.defaultOption ? { defaultOption: event.request.defaultOption } : {}),
+          ...(event.request.context ? { context: event.request.context } : {}),
+        };
+      case "user_question_resolved":
+        return { type: "USER_QUESTION_CLOSED", requestId: event.requestId };
+      case "todo_updated":
+        return {
+          type: "TODO_UPDATED",
+          sessionId: event.plan.sessionId,
+          items: event.plan.items.map(toTodoItemView),
         };
       case "error":
         return { type: "AGENT_ERROR", error: event.error.message };
@@ -717,6 +750,16 @@ export class MessageRouter {
           throw new Error("Invalid DELETE_MESSAGE message");
         }
         return message as WebviewMessage;
+      case "ANSWER_USER_QUESTION":
+        if (typeof typed.requestId !== "string" || typeof typed.answer !== "string") {
+          throw new Error("Invalid ANSWER_USER_QUESTION message");
+        }
+        return message as WebviewMessage;
+      case "CANCEL_USER_QUESTION":
+        if (typeof typed.requestId !== "string") {
+          throw new Error("Invalid CANCEL_USER_QUESTION message");
+        }
+        return message as WebviewMessage;
       case "GET_PERMISSION_RULES":
         return message as WebviewMessage;
       case "SET_PERMISSION_RULE":
@@ -823,6 +866,14 @@ function toLocalModel(model: RuntimeModel): { id: string; name: string; provider
     name: model.name,
     provider: model.provider === "openai-compatible" ? "openai-compatible" : "ollama",
   };
+}
+
+function toTodoItemView(item: { id: string; title: string; status: string }): {
+  id: string;
+  title: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+} {
+  return { id: item.id, title: item.title, status: item.status as "pending" | "in_progress" | "completed" | "cancelled" };
 }
 
 function toFileChangeView(change: FileChangeSummary): FileChangeView {

@@ -40,6 +40,10 @@ export type WebviewMessage =
   | { type: "SET_PERMISSION_RULE"; category: PermissionRuleCategory; rule: PermissionRule }
   /** Chat UI Delete: removes a message from UI and conversation persistence. */
   | { type: "DELETE_MESSAGE"; sessionId: string; messageId: string }
+  /** `ask_user`: the user's answer to a pending agent question. */
+  | { type: "ANSWER_USER_QUESTION"; requestId: string; answer: string }
+  /** `ask_user`: the user dismissed the question without answering. */
+  | { type: "CANCEL_USER_QUESTION"; requestId: string }
   | { type: "GET_EXTENSION_INFO" };
 
 export type AuthStatus = "disconnected" | "connecting" | "connected" | "error";
@@ -105,6 +109,20 @@ export interface ExtensionInfoView {
   activeModelId?: string;
 }
 
+/** One choice offered by an `ask_user` question. */
+export interface UserQuestionOptionView {
+  label: string;
+  value: string;
+  description?: string;
+}
+
+/** One task-plan row (sanitized; the host owns the authoritative plan). */
+export interface TodoItemView {
+  id: string;
+  title: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+}
+
 export type ExtensionMessage =
   | { type: "AGENT_STATE"; state: AgentState }
   | { type: "AGENT_MESSAGE"; message: string; messageId?: string }
@@ -121,6 +139,19 @@ export type ExtensionMessage =
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
   | { type: "AUTO_APPROVE_STATE"; enabled: boolean; scope: "conversation" | "runtime" }
   | { type: "PERMISSION_RULES"; rules: Record<PermissionRuleCategory, PermissionRule> }
+  /** `ask_user`: a question the agent is waiting on (correlated by requestId). */
+  | {
+      type: "USER_QUESTION";
+      requestId: string;
+      question: string;
+      options?: UserQuestionOptionView[];
+      defaultOption?: string;
+      context?: string;
+    }
+  /** `ask_user`: the question is no longer pending (answered/cancelled). */
+  | { type: "USER_QUESTION_CLOSED"; requestId: string }
+  /** `update_todo`: sanitized task-plan snapshot for the active conversation. */
+  | { type: "TODO_UPDATED"; sessionId: string; items: TodoItemView[] }
   | { type: "EXTENSION_INFO"; info: ExtensionInfoView }
   | AuthStatusMessage
   | {

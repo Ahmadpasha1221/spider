@@ -4,6 +4,7 @@ import { AppState, ChatLine, createInitialState, phaseFromAgentState, type Setti
 import { createComposer } from "./components/composer";
 import { createMessageList } from "./components/messageList";
 import { createSessionBar } from "./components/sessionBar";
+import { createQuestionPrompt, createTodoPanel } from "./components/agentPanels";
 import { renderChatView } from "./views/chatView";
 import { renderSettingsView } from "./views/settingsView";
 
@@ -60,6 +61,20 @@ const sessionBar = createSessionBar(sessionBarRoot, {
   onCreate: () => startNewConversation(),
 });
 
+// Phase 3 surfaces: a task-plan panel and an ask_user prompt. Both mirror
+// host-authoritative state; the components own their own DOM.
+const todoPanel = createTodoPanel();
+const questionPrompt = createQuestionPrompt({
+  onAnswer: (requestId, answer) => {
+    state.pendingQuestion = undefined;
+    postToHost({ type: "ANSWER_USER_QUESTION", requestId, answer });
+  },
+  onCancel: (requestId) => {
+    state.pendingQuestion = undefined;
+    postToHost({ type: "CANCEL_USER_QUESTION", requestId });
+  },
+});
+
 settingsBtn.addEventListener("click", () => {
   state.view = state.view === "settings" ? "chat" : "settings";
   render();
@@ -103,6 +118,11 @@ function startNewConversation(): void {
   state.lastPrompt = undefined;
   state.running = false;
   state.phase = "idle";
+  // Task plan and any pending question belong to the previous conversation.
+  state.todoItems = [];
+  todoPanel.clear();
+  state.pendingQuestion = undefined;
+  questionPrompt.hide();
   messageList.clear();
   postToHost({ type: "NEW_SESSION" });
 }
@@ -336,6 +356,30 @@ function handleHostMessage(message: HostToGui): void {
       state.messages.push(line);
       messageList.append([line]);
       chatLineChanged = true;
+      break;
+    }
+    case "USER_QUESTION": {
+      const pending = {
+        requestId: message.requestId,
+        question: message.question,
+        ...(message.options ? { options: message.options } : {}),
+        ...(message.defaultOption ? { defaultOption: message.defaultOption } : {}),
+        ...(message.context ? { context: message.context } : {}),
+      };
+      state.pendingQuestion = pending;
+      questionPrompt.show(pending);
+      break;
+    }
+    case "USER_QUESTION_CLOSED": {
+      if (!state.pendingQuestion || state.pendingQuestion.requestId === message.requestId) {
+        state.pendingQuestion = undefined;
+      }
+      questionPrompt.hide(message.requestId);
+      break;
+    }
+    case "TODO_UPDATED": {
+      state.todoItems = message.items;
+      todoPanel.update(message.items);
       break;
     }
   }

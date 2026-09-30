@@ -51,6 +51,10 @@ export type GuiToHost =
   | { type: "SET_PERMISSION_RULE"; category: PermissionRuleCategory; rule: PermissionRule }
   /** Chat UI Delete: removes a message from the UI and conversation persistence. */
   | { type: "DELETE_MESSAGE"; sessionId: string; messageId: string }
+  /** `ask_user`: the user's answer to a pending agent question. */
+  | { type: "ANSWER_USER_QUESTION"; requestId: string; answer: string }
+  /** `ask_user`: the user dismissed the question without answering. */
+  | { type: "CANCEL_USER_QUESTION"; requestId: string }
   | { type: "GET_EXTENSION_INFO" }
   | { type: "OPEN_DIFF"; changeId: string }
   | { type: "RESOLVE_FILE_CHANGE"; changeId: string; decision: "ACCEPT" | "REJECT" }
@@ -90,6 +94,20 @@ export interface FileChangeView {
   isNewFile: boolean;
 }
 
+/** One choice offered by an `ask_user` question. */
+export interface UserQuestionOptionView {
+  label: string;
+  value: string;
+  description?: string;
+}
+
+/** One task-plan row (sanitized; the host owns the authoritative plan). */
+export interface TodoItemView {
+  id: string;
+  title: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+}
+
 export type HostToGui =
   | { type: "AGENT_STATE"; state: string }
   | { type: "AGENT_MESSAGE"; message: string; messageId?: string }
@@ -106,6 +124,19 @@ export type HostToGui =
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
   | { type: "AUTO_APPROVE_STATE"; enabled: boolean; scope: "conversation" | "runtime" }
   | { type: "PERMISSION_RULES"; rules: Record<PermissionRuleCategory, PermissionRule> }
+  /** `ask_user`: a question the agent is waiting on (correlated by requestId). */
+  | {
+      type: "USER_QUESTION";
+      requestId: string;
+      question: string;
+      options?: UserQuestionOptionView[];
+      defaultOption?: string;
+      context?: string;
+    }
+  /** `ask_user`: the question is no longer pending (answered/cancelled). */
+  | { type: "USER_QUESTION_CLOSED"; requestId: string }
+  /** `update_todo`: sanitized task-plan snapshot for the active conversation. */
+  | { type: "TODO_UPDATED"; sessionId: string; items: TodoItemView[] }
   | { type: "EXTENSION_INFO"; info: ExtensionInfoView }
   | { type: "AUTH_STATUS"; status: AuthStatus; hasKey: boolean; error?: string; message?: string }
   | { type: "RUNTIME_STATUS"; provider: RuntimeProvider; connected: boolean; modelId?: string; modelName?: string; localProvider?: LocalProvider; error?: string }

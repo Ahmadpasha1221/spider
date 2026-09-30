@@ -1,5 +1,11 @@
 import type { PermissionRequest } from "../permissions/permissionTypes";
 import type { AgentMode } from "./tools/toolAvailability";
+import type { TaskPlan, TodoItem } from "./state/taskPlan";
+import type {
+  UserQuestionAnswer,
+  UserQuestionRequestInput,
+  UserQuestion,
+} from "./userInteraction/userQuestionBroker";
 
 export type RuntimeProvider = "cursor" | "ollama" | "openai-compatible" | "openrouter" | "mock";
 
@@ -196,6 +202,9 @@ export type DiffHunk = {
 
 export type RuntimeEvent =
   | { type: "status"; sessionId: string; status: RuntimeSessionStatus; timestamp: number }
+  | { type: "user_question"; sessionId: string; request: UserQuestion; timestamp: number }
+  | { type: "user_question_resolved"; sessionId: string; requestId: string; timestamp: number }
+  | { type: "todo_updated"; sessionId: string; plan: TaskPlan; timestamp: number }
   | { type: "thinking"; sessionId: string; message: string; timestamp: number }
   | { type: "text_delta"; sessionId: string; text: string; timestamp: number }
   | {
@@ -305,6 +314,13 @@ export interface RuntimeToolExecutorContext {
    * while the command runs instead of only when it exits.
    */
   readonly onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
+  /**
+   * Human-in-the-loop gateway for `ask_user`. Injected by the runtime so the
+   * tool never touches the webview or the broker directly.
+   */
+  readonly askUser?: (request: UserQuestionRequestInput) => Promise<UserQuestionAnswer>;
+  /** Authoritative task-plan writer for `update_todo`. */
+  readonly taskPlan?: { update(items: readonly TodoItem[]): TaskPlan };
 }
 
 export interface RuntimeToolExecutor {

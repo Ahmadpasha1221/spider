@@ -143,9 +143,9 @@ export class BackgroundProcessManager {
     const stdout = new BoundedBuffer(this.maxBufferChars);
     const stderr = new BoundedBuffer(this.maxBufferChars);
 
-    let markClosed: () => void = () => undefined;
+    let resolveClosed: () => void = () => undefined;
     const closed = new Promise<void>((resolve) => {
-      markClosed = resolve;
+      resolveClosed = resolve;
     });
 
     const record: ManagedProcess = {
@@ -153,7 +153,15 @@ export class BackgroundProcessManager {
       stdout,
       stderr,
       closed,
-      markClosed,
+      // Idempotent, and the single place `closedSettled` flips, so pruning and
+      // every wait helper always agree that the child is gone.
+      markClosed: () => {
+        if (record.closedSettled) {
+          return;
+        }
+        record.closedSettled = true;
+        resolveClosed();
+      },
       closedSettled: false,
     };
     this.remember(record);
@@ -183,6 +191,15 @@ export class BackgroundProcessManager {
 
     child.stdout?.on("data", (chunk: Buffer | string) => stdout.push(String(chunk)));
     child.stderr?.on("data", (chunk: Buffer | string) => stderr.push(String(chunk)));
+    // Persistent error handler: the startup wait removes its own listeners once
+    // it resolves, so a late child error (a stream error after spawn, for
+    // example) would otherwise surface as an unhandled 'error' event.
+    child.on("error", (error: Error) => {
+      record.markClosed();
+      if (!isTerminal(record.info.status)) {
+        this.setStatus(record, "failed", { error: errorMessage(error) });
+      }
+    });
     child.once("close", (code) => this.settle(record, code ?? null));
     child.once("exit", (code) => {
       if (!record.closedSettled) {
@@ -233,14 +250,94 @@ export class BackgroundProcessManager {
     return Array.from(this.processes.values(), (record) => ({ ...record.info }));
   }
 
-  /** Bounded recent output; Phase 3's `get_command_output` layers on this. */
-  output(processId: string, options: { maxChars?: number } = {}): BackgroundProcessOutput | undefined {
+  /**
+   * Bounded recent output (a rolling tail, never the whole lifetime). callers
+   * may cap by characters, bytes and/or lines; the effective character budget
+   * is the smallest of the requested caps. `get_command_output` layers on this
+   * without ever touching the process registry directly.
+   */
+  output(
+    processId: string,
+    options: { maxChars?: number; maxBytes?: number; maxLines?: number } = {},
+  ): BackgroundProcessOutput | undefined {
     const record = this.processes.get(processId);
     if (!record) {
       return undefined;
     }
     const maxChars = positive(options.maxChars, this.maxReadChars);
-    return this.readOutput(record, maxChars);
+    const maxBytes = positive(options.maxBytes, maxChars);
+    const maxLines = options.maxLines === undefined ? undefined : Math.max(1, Math.floor(options.maxLines));
+    return this.readOutput(record, Math.min(maxChars, maxBytes), maxLines);
+  }
+
+  /** True when this manager created the process with the given id. */
+  has(processId: string): boolean {
+    return this.processes.has(processId);
+  }
+
+  /**
+   * Resolves once the process is no longer running (exited, failed, killed,
+   * or cancelled), with the terminal info. Bounded by `timeoutMs` when given:
+   * on timeout the process is terminated and `timedOut` is reported. Used by
+   * `run_tests` to await completion without inventing a second process
+   * registry — the manager stays the single lifecycle owner.
+   */
+  async whenClosed(
+    processId: string,
+    options: { timeoutMs?: number; signal?: AbortSignal } = {},
+  ): Promise<{ info: BackgroundProcessInfo; timedOut: boolean } | undefined> {
+    const record = this.processes.get(processId);
+    if (!record) {
+      return undefined;
+    }
+    const timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : undefined;
+    const signal = options.signal;
+
+    const waitForAbort = (): Promise<void> | undefined => {
+      if (!signal) {
+        return undefined;
+      }
+      if (signal.aborted) {
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve) => {
+        signal.addEventListener("abort", () => resolve(), { once: true });
+      });
+    };
+
+    const waitForTimeout = (): Promise<void> | undefined => {
+      if (!timeoutMs) {
+        return undefined;
+      }
+      return new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      });
+    };
+
+    const abortPromise = waitForAbort();
+    const timeoutPromise = waitForTimeout();
+
+    const raced = await Promise.race([
+      record.closed.then(() => "closed" as const),
+      ...(abortPromise ? [abortPromise.then(() => "abort" as const)] : []),
+      ...(timeoutPromise ? [timeoutPromise.then(() => "timeout" as const)] : []),
+    ]);
+
+    if (raced === "timeout" && !isTerminal(record.info.status)) {
+      this.terminate(record, true);
+      await this.waitForClose(record, this.killGraceMs);
+    }
+    if (raced === "abort" && !isTerminal(record.info.status)) {
+      void this.stop(processId, { force: true });
+    }
+
+    // A terminal status is normally set by close/stop; the abort path races a
+    // fire-and-forget stop, so settle the status explicitly if needed.
+    if (!isTerminal(record.info.status)) {
+      record.info = { ...record.info, status: raced === "timeout" ? "failed" : "killed" };
+    }
+    return { info: { ...record.info }, timedOut: raced === "timeout" };
   }
 
   /**
@@ -408,9 +505,9 @@ export class BackgroundProcessManager {
     };
   }
 
-  private readOutput(record: ManagedProcess, maxChars: number): BackgroundProcessOutput {
-    const stdout = record.stdout.read(maxChars);
-    const stderr = record.stderr.read(maxChars);
+  private readOutput(record: ManagedProcess, maxChars: number, maxLines?: number): BackgroundProcessOutput {
+    const stdout = this.readStream(record.stdout, maxChars, maxLines);
+    const stderr = this.readStream(record.stderr, maxChars, maxLines);
     return {
       processId: record.info.processId,
       status: record.info.status,
@@ -420,6 +517,20 @@ export class BackgroundProcessManager {
       stdoutTotal: record.stdout.total,
       stderrTotal: record.stderr.total,
     };
+  }
+
+  /** One stream: char/byte tail first, then an optional line tail. */
+  private readStream(buffer: BoundedBuffer, maxChars: number, maxLines?: number): { text: string; truncated: boolean } {
+    const read = buffer.read(maxChars);
+    if (maxLines === undefined) {
+      return read;
+    }
+    const lines = read.text.split("\n");
+    if (lines.length <= maxLines) {
+      return read;
+    }
+    // Keep the most recent lines; the dropped ones are reported as truncation.
+    return { text: lines.slice(lines.length - maxLines).join("\n"), truncated: true };
   }
 
   private uniqueId(): string {

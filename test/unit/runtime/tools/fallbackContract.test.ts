@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildFallbackToolContract, listAvailableToolNames, listRegisteredTools } from "../../../../src/runtime/tools/toolRegistry";
 
 describe("fallback tool contract", () => {
-  it("lists exactly the fifteen canonical tools", () => {
+  it("lists exactly the thirty-five canonical tools", () => {
     expect(listAvailableToolNames()).toEqual([
       "list_files",
       "read_file",
@@ -18,6 +18,26 @@ describe("fallback tool contract", () => {
       "glob_search",
       "get_diagnostics",
       "git_status",
+      "git_diff",
+      "git_log",
+      "get_active_file",
+      "get_selection",
+      "background_command",
+      "get_command_output",
+      "kill_command",
+      "ask_user",
+      "update_todo",
+      "fetch_url",
+      "search_web",
+      "codebase_search",
+      "repo_map",
+      "git_show",
+      "git_blame",
+      "list_symbols",
+      "go_to_definition",
+      "find_references",
+      "get_problems",
+      "run_tests",
       "finish",
     ]);
   });
@@ -42,8 +62,17 @@ describe("fallback tool contract", () => {
 
   it("contains no fake aliases", () => {
     const contract = buildFallbackToolContract();
+    const declared = new Set(listRegisteredTools().map((tool) => tool.name));
+    // Tool names are emitted as their own line, before "Description:".
+    const nameLines = contract
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^[a-z][a-z_]*$/.test(line));
+    for (const name of nameLines) {
+      expect(declared.has(name)).toBe(true);
+    }
     for (const forbidden of ["create_file", "create_txt_file", "execute", "chat", "question", "shell"]) {
-      expect(contract).not.toContain(`"${forbidden}"`);
+      expect(nameLines).not.toContain(forbidden);
     }
   });
 });

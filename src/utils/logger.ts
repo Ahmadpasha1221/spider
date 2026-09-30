@@ -8,6 +8,11 @@ interface LogEntry {
   operation?: string;
   requestId?: string;
   sessionId?: string;
+  /** Structured tool-execution context (name, timing, size, outcome). */
+  toolName?: string;
+  durationMs?: number;
+  resultBytes?: number;
+  outcome?: string;
 }
 
 const LEVELS: Record<LogLevel, number> = {
@@ -23,6 +28,10 @@ function formatEntry(entry: LogEntry): string {
     operation: entry.operation,
     requestId: entry.requestId,
     sessionId: entry.sessionId,
+    toolName: entry.toolName,
+    durationMs: entry.durationMs,
+    resultBytes: entry.resultBytes,
+    outcome: entry.outcome,
   };
   const included = Object.entries(extras).filter(([, value]) => value !== undefined);
   if (included.length === 0) {
@@ -69,6 +78,10 @@ export class Logger {
       operation: context.operation,
       requestId: context.requestId,
       sessionId: context.sessionId,
+      toolName: context.toolName,
+      durationMs: context.durationMs,
+      resultBytes: context.resultBytes,
+      outcome: context.outcome,
     };
 
     console.log(formatEntry(entry));

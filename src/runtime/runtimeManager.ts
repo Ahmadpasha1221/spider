@@ -23,8 +23,11 @@ import {
   RuntimeToolCall,
   RuntimeToolCallResponse,
   RuntimeToolExecutor,
+  RuntimeToolExecutorContext,
 } from "./runtimeTypes";
-import type { BackgroundProcessManager } from "./tools/backgroundProcessManager";
+import { BackgroundProcessManager } from "./tools/backgroundProcessManager";
+import { UserQuestionBroker } from "./userInteraction/userQuestionBroker";
+import { TaskPlanStore } from "./state/taskPlan";
 
 export interface RuntimeManagerOptions {
   readonly sessionStore: SessionStore;
@@ -95,6 +98,19 @@ function describePermissionTarget(input: Record<string, unknown>): string | unde
   if (typeof input.path === "string") {
     return input.path;
   }
+  if (typeof input.url === "string") {
+    return input.url;
+  }
+  if (typeof input.query === "string") {
+    return input.query;
+  }
+  // The position tools (go_to_definition / find_references) identify their
+  // target as path:line:character; show it compactly in permission prompts.
+  if (typeof input.path === "string" && typeof input.line === "number") {
+    const line = Number.isFinite(input.line) ? Math.max(0, Math.floor(input.line)) : 0;
+    const character = typeof input.character === "number" && Number.isFinite(input.character) ? Math.max(0, Math.floor(input.character)) : 0;
+    return `${input.path}:${line + 1}:${character + 1}`;
+  }
   return typeof input.from === "string" ? input.from : undefined;
 }
 
@@ -131,6 +147,10 @@ export class RuntimeManager implements vscode.Disposable {
    * deactivates; never persisted across restarts.
    */
   private readonly backgroundProcesses: import("./tools/backgroundProcessManager").BackgroundProcessManager;
+  /** Pending `ask_user` questions, correlated by request id. */
+  private readonly userQuestions = new UserQuestionBroker();
+  /** Per-conversation task plan (structured agent state, never the transcript). */
+  private readonly taskPlans = new TaskPlanStore();
 
   /**
    * Live command-output buffers, keyed by toolCallId. Chunks are coalesced and
@@ -151,6 +171,44 @@ export class RuntimeManager implements vscode.Disposable {
     for (const runtime of options.runtimes) {
       this.runtimes.set(runtime.provider, runtime);
     }
+    // Bridge question lifecycle onto the runtime event bus the webview watches.
+    this.userQuestions.onEvent((event) => {
+      if (event.type === "asked") {
+        this.publishEvent({
+          type: "user_question",
+          sessionId: event.request.sessionId,
+          request: event.request,
+          timestamp: Date.now(),
+        });
+      } else {
+        this.publishEvent({
+          type: "user_question_resolved",
+          sessionId: event.sessionId,
+          requestId: event.requestId,
+          timestamp: Date.now(),
+        });
+      }
+    });
+  }
+
+  /** Resolves a pending `ask_user` question. Returns false for a stale id. */
+  resolveUserQuestion(requestId: string, answer: string): boolean {
+    return this.userQuestions.answer(requestId, answer);
+  }
+
+  /** Dismisses a pending `ask_user` question. Returns false for a stale id. */
+  cancelUserQuestion(requestId: string): boolean {
+    return this.userQuestions.cancel(requestId);
+  }
+
+  /** Cancels every pending question (webview disposal / extension deactivate). */
+  cancelPendingUserQuestions(): void {
+    this.userQuestions.cancelAll("cancelled");
+  }
+
+  /** Current task plan for a conversation (sanitized snapshot or undefined). */
+  getTaskPlan(sessionId: string): ReturnType<TaskPlanStore["get"]> {
+    return this.taskPlans.get(sessionId);
   }
 
   getUsage(sessionId: string): RuntimeUsage {
@@ -412,6 +470,8 @@ export class RuntimeManager implements vscode.Disposable {
       this.activeSessionId = this.getMostRecentSessionId();
     }
     this.options.permissionManager.cancelSessionRequests(sessionId);
+    this.userQuestions.cancelSession(sessionId);
+    this.taskPlans.clear(sessionId);
     try {
       await this.options.transcriptStore?.delete(sessionId);
     } catch {
@@ -611,6 +671,9 @@ export class RuntimeManager implements vscode.Disposable {
       this.activeRuns.delete(sessionId);
       this.clearSessionCommandStreams(sessionId);
       this.options.permissionManager.cancelSessionRequests(sessionId);
+      // A question the user never answered must not keep a promise (or a
+      // future run) alive once the run is over.
+      this.userQuestions.cancelSession(sessionId);
       // Transcript appends are queued, not awaited, per event (a run must not
       // block on disk). Flushing here means the run is durable by the time the
       // caller sees it finish, so a restore can never miss the last entries.
@@ -651,6 +714,7 @@ export class RuntimeManager implements vscode.Disposable {
 
     this.updateSession(sessionId, { status: "CANCELLING" });
     this.options.permissionManager.cancelSessionRequests(sessionId);
+    this.userQuestions.cancelSession(sessionId);
     activeRun.controller.abort();
     const runtime = this.getRequiredRuntime(session.provider);
     await runtime.cancel({
@@ -671,6 +735,8 @@ export class RuntimeManager implements vscode.Disposable {
       runtime.dispose();
     }
     void this.backgroundProcesses.dispose();
+    this.userQuestions.dispose();
+    this.taskPlans.dispose();
     this.emitter.dispose();
   }
 
@@ -736,7 +802,7 @@ export class RuntimeManager implements vscode.Disposable {
     }
 
     await this.captureFileChange(sessionId, call, "begin");
-    const context = {
+    const context: RuntimeToolExecutorContext = {
       session,
       signal,
       // Long-running commands stream output to the UI while they run; the
@@ -747,6 +813,16 @@ export class RuntimeManager implements vscode.Disposable {
               this.pushCommandStream(sessionId, call, stream, chunk),
           }
         : {}),
+      // Human-in-the-loop + agent state gateways: the tools stay thin and the
+      // runtime stays the single owner of pending questions and task plans.
+      askUser: (request) => this.userQuestions.ask({ ...request, sessionId }),
+      taskPlan: {
+        update: (items) => {
+          const plan = this.taskPlans.update(sessionId, items);
+          this.publishEvent({ type: "todo_updated", sessionId, plan, timestamp: Date.now() });
+          return plan;
+        },
+      },
     };
     const startedAt = Date.now();
     const response = await this.toolRouter.route(

@@ -3,6 +3,7 @@ import type { ToolName } from "@cursor/sdk";
 import {
   DESTRUCTIVE_TOOL_NAMES,
   EXECUTE_TOOL_NAMES,
+  EXTERNAL_TOOL_NAMES,
   MODIFY_TOOL_NAMES,
   READ_TOOL_NAMES,
 } from "../runtime/tools/localToolDefinitions";
@@ -50,6 +51,7 @@ export class PermissionPolicy {
     }
 
     if (
+      EXTERNAL_TOOL_NAMES.has(normalizedTool) ||
       normalizedTool === "mcp" ||
       normalizedTool === "webfetch" ||
       normalizedTool === "websearch" ||

@@ -245,6 +245,26 @@ fallback contract. `isLocalToolName` is the membership test.
 | `glob_search` | file-path search by glob | `pattern` (required), `path?`, `maxResults?` | safe | `{ pattern, path, files[...], scannedFiles, truncated?, reason? }` |
 | `get_diagnostics` | current VS Code diagnostics | `scope?` (`workspace`/`file`), `path?` | safe | `{ scope, diagnostics[{path,severity,message,source?,code?,start,end}], counts, truncated? }` |
 | `git_status` | read-only Git working tree | `path?`, `includeIgnored?` | safe | `{ repository, branch, detached, ahead, behind, clean, files[{path,status,staged,originalPath?}], truncated? }` |
+| `git_diff` | read-only Git diff (working tree / staged / one file) | `scope?` (`working_tree`/`staged`/`file`), `path?` (required for `file`) | safe | `{ repository, scope, path?, files[{path,status,additions,deletions}], diff, truncated?, reason? }` |
+| `git_log` | read-only Git history | `limit?` (default 20, max 100), `path?` | safe | `{ repository, limit, path?, commits[{hash,shortHash,author,date,subject}], truncated?, reason? }` |
+| `get_active_file` | identity of the file the developer is editing | `includeWorkspaceFolders?` | safe | `{ file: {path?,name,languageId,lineCount,isDirty,version,untitled?,outsideWorkspace?,workspaceFolder?} \| null, workspaceFolders?, message? }` (never contents) |
+| `get_selection` | current editor selection(s) + selected text | `maxChars?` (default 4000, max 20000) | safe | `{ selection \| selections[], truncated? }`; ranges as `{line,column}`, text redacted/truncated, empty for sensitive files |
+| `background_command` | start a long-running process without blocking the agent | `command` (required), `args?`, `cwd?`, `startupTimeoutMs?` | execute | `{ processId, command, args, cwd, status, pid?, exitCode?, error?, stdout?, stderr?, outputTruncated?, cancelled?, message? }` |
+| `get_command_output` | read recent output of a `background_command` process | `processId` (required), `maxBytes?`, `maxLines?` | safe | `{ processId, status, stdout, stderr, truncated, stdoutTotal, stderrTotal }` |
+| `kill_command` | stop a Spider-started process | `processId` (required), `force?` | execute | `{ processId, status, message? }` |
+| `ask_user` | ask the user a clarifying question and wait | `question` (required), `options?`, `defaultOption?`, `context?` | safe | `{ requestId, answer, cancelled?, message? }` |
+| `update_todo` | replace the task plan for the current conversation | `items` (required, max 50) | safe | `{ sessionId, items[], updatedAt, counts, inProgressId? }` |
+| `fetch_url` | retrieve one specific https URL | `url` (required), `maxBytes?`, `timeoutMs?` | **external** | `{ url, status, contentType, content, truncated?, unsupported?, redirects?, bytes?, reason?, message? }` |
+| `search_web` | search the public web for links + snippets (not a page fetcher) | `query` (required, max 400), `maxResults?` (default 5, max 20), `recencyDays?` | **external** | `{ query, results[{title,url,snippet,source?}], provider?, truncated?, reason?, message? }` |
+| `codebase_search` | intent-oriented repository search over code regions | `query` (required), `maxResults?` (default 8, max 20) | safe | `{ query, results[{path,startLine,endLine,score,matchedTerms[],reason}], scannedFiles, truncated?, reason? }` |
+| `repo_map` | compact structural tree of the repository | `depth?` (default 3, max 6), `path?` | safe | `{ root, tree[], entries, truncated, cancelled? }` |
+| `git_show` | read-only metadata + bounded diff for one commit | `commit` (required), `path?` | safe | `{ repository, commit{hash,shortHash,author,date,subject}, path?, files[], diff, truncated, reason? }` |
+| `git_blame` | read-only per-line attribution for a bounded range | `path` (required), `startLine?`, `endLine?` (max 200 lines) | safe | `{ repository, path, startLine, endLine, lines[{line,commit,shortCommit,author,date,summary}], truncated?, reason? }` |
+| `list_symbols` | code symbols from one file or the workspace (no parsing) | `scope?` (`document` default / `workspace`), `path?` (required for document), `query?` | safe | `{ scope, path?, symbols[{name,kind,path,range,detail?,children?}], truncated, reason? }` (max 200) |
+| `go_to_definition` | resolve the symbol at a position to its definition(s) | `path`, `line`, `character` (all required, zero-based) | safe | `{ path, definitions[{path,range}], truncated?, reason? }` (max 20); empty list + message when none |
+| `find_references` | usages of the symbol at a position | `path`, `line`, `character`, `includeDeclaration?` (default true) | safe | `{ path, includeDeclaration, references[{path,range}], truncated, reason? }` (max 500) |
+| `get_problems` | diagnostics VS Code currently reports | `scope?` (`workspace` default / `file`), `path?` (required for file) | safe | `{ scope, path?, problems[{path,severity,message,source?,code?,range}], summary, truncated, reason?, note? }` (max 500) |
+| `run_tests` | run the project's test suite with an approved runner | `runner` (required, allow-list), `args?` (argv), `cwd?`, `timeoutMs?` (default 120000, max 300000) | **execute** | `{ runner, args, command, cwd, passed, exitCode, durationMs, stdout, stderr, timedOut, cancelled?, truncated, status }` |
 | `finish` | end the task | `summary` | safe | executed inline in the registry (no executor); sets `finished: true` |
 
 ### Shared tool building blocks (Phase 1, 2026-09-29)
@@ -265,11 +285,98 @@ fallback contract. `isLocalToolName` is the membership test.
   `read_multiple_files`) + the multi-file reader and its caps
   (20 files / 60 KB each / 120 KB total).
 - `gitStatusTool.ts` — argv-only `git` runner (`shell: false`,
-  `--no-optional-locks`, 15 s timeout, output capped, read only) and the
-  porcelain v2 parser.
+  `--no-optional-locks`, 15 s timeout, output capped, read only), the
+  porcelain v2 parser, and the shared `isNotARepository` predicate reused by
+  every git tool.
+- `gitDiffTool.ts` / `gitLogTool.ts` (Phase 2) — read-only git inspection. The
+  model supplies only a *scope / limit / pathspec*; Spider builds the fixed
+  argv (`--no-ext-diff`, `--no-textconv`, `--unified=3`, `--find-renames`,
+  `--max-count`). The unified-diff and commit-record parsers reject anything
+  that does not look like real git output (no injected records); diffs are
+  capped at 200 KB and history at 100 commits with `{truncated:true, reason}`.
+- `../editor/editorContextSource.ts` + `editorTools.ts` (Phase 2) — injectable
+  editor context mirroring `diagnosticsSource` (`vscode` imported lazily). The
+  tools depend on the interface, not VS Code, so they are testable outside the
+  extension host. `get_active_file` returns identity only; `get_selection`
+  returns ranges plus redacted, capped text (empty for sensitive files).
+- `backgroundProcessManager.ts` (Phase 2) — the managed background-process
+  registry (in-memory only, bounded rolling per-stream buffers, retained-
+  process cap). `background_command` starts an argv-only process
+  (`shell: false`, `windowsHide: true`); **the tool request is decoupled from
+  the process lifetime** — cancelling an agent run stops waiting for startup
+  but never kills a process that already started. Only `stop()`/`dispose()`/
+  `shutdown()` end processes, and a persistent `error` listener records late
+  child errors instead of letting them go unhandled.
 - `../diagnostics/diagnosticsSource.ts` — injectable diagnostics source;
   normalization (severity, secret redaction, truncation, ordering) is reused
   from the existing `src/context/diagnosticsContext.ts`.
+- `processTools.ts` (Phase 3) — `get_command_output` / `kill_command` are thin
+  adapters over `BackgroundProcessManager.output()` / `stop()`. They own no
+  process state, so they cannot drift from `background_command`; the id is the
+  manager's opaque handle (never an OS pid), so an arbitrary pid is unkillable.
+- `../userInteraction/userQuestionBroker.ts` (Phase 3) — pending `ask_user`
+  questions correlated by `requestId`, with multi-pending safety, cancel by
+  id/session, and dispose. No `vscode` import, so it is host-independent.
+- `../state/taskPlan.ts` (Phase 3) — the authoritative per-conversation plan
+  (`TaskPlanStore`), separate from the transcript and never persisted to
+  credentials/config/logs. Sanitized snapshots ship to the webview only.
+- `../net/urlSecurity.ts` + `fetchUrlTool.ts` + `htmlText.ts` (Phase 3) — SSRF
+  policy (https only; loopback/private/link-local/metadata blocked on the
+  original URL and every redirect, with DNS resolution) plus a bounded,
+  script-free fetch that extracts readable text from HTML.
+- `../net/webSearchProvider.ts` + `searchWebTool.ts` (Phase 4) — the ONE search
+  provider abstraction (`WebSearchProvider`; `createStoredWebSearchProvider`
+  reads its key lazily from SecretStorage with a Brave-compatible default
+  endpoint) plus a provider-agnostic, bounded, deduplicating tool. The tool
+  holds no provider-specific details, so swapping providers is an
+  implementation of the interface. Results are data only, never instructions.
+- `codebaseSearchTool.ts` (Phase 4) — intent-oriented retrieval that reuses
+  `workspaceSearch.ts` (same walker, ignore set, binary detection and
+  `SEARCH_LIMITS`) and `isSensitiveFilePath`; scores fixed-size line chunks by
+  query-term coverage and trims deterministically (score, then path, then
+  line). No vector database or embedding service was introduced.
+- `repoMapTool.ts` (Phase 4) — compact structural tree from the same walker and
+  ignore set (directories before files, sorted, symlinks not followed,
+  depth/entry caps).
+- `gitShowTool.ts` / `gitBlameTool.ts` (Phase 4) — read-only git inspection on
+  the shared argv-only runner and the existing log/diff parsers. `commit` and
+  `path` are validated (no ranges, no leading `-`, workspace-relative), git
+  flags are chosen by Spider, and the blame range is bounded *before* git runs.
+- `../lsp/languageSource.ts` (Phase 5) — the ONE language-intelligence source
+  (`LanguageSource`: documentSymbols / workspaceSymbols / definitions /
+  references), mirroring `DiagnosticsSource` and `EditorContextSource`. VS Code
+  is imported lazily; `vscode.executeDocumentSymbolProvider`,
+  `executeWorkspaceSymbolProvider`, `executeDefinitionProvider` and
+  `executeReferenceProvider` are the only language capabilities used — no
+  custom parser for any language. Every provider result is normalized into
+  plain serializable data (workspace-relative POSIX paths, zero-based
+  positions) and every call is wrapped in a bounded provider timeout (10 s)
+  with signal-based cancellation. No vscode.Uri / Position / Range /
+  SymbolInformation / Location object ever reaches the model.
+- `symbolTools.ts` (Phase 5) — `list_symbols` over `LanguageSource`: document
+  tree (parents before children) or bounded workspace symbols, capped at 200
+  with explicit truncation.
+- `navigationTools.ts` (Phase 5) — `go_to_definition` / `find_references`:
+  position-validated (zero-based, finite, non-negative), workspace-bound, cap
+  20 definitions / 500 references; "nothing found" is a normal empty result.
+- `problemsTool.ts` (Phase 5) — `get_problems` reuses `DiagnosticsSource` and
+  the existing diagnostics normalizer (severity, redaction, ordering) — one
+  normalizer for both `get_diagnostics` and `get_problems`. It reports what
+  the editor currently knows and never runs a build; a `note` tells the model
+  diagnostics may lag a fresh edit. Capped at 500 with a severity summary.
+- `runTestsTool.ts` (Phase 5) — `run_tests`: a fixed allow-list of runner
+  executables (`pnpm`, `npm`, `yarn`, `pytest`, `python`, `python3`, `cargo`,
+  `go`), argv-only args (no shell string can exist), workspace-validated cwd,
+  bounded timeout (default 120 s, max 300 s) and bounded stdout/stderr. The
+  process is started and awaited through `BackgroundProcessManager.start()`
+  plus the `whenClosed()` completion wait, so timeout/cancellation reuse the
+  existing kill machinery (graceful-then-forced) — no second process registry.
+  It is a *foreground verification* tool: unlike `background_command`, the
+  request waits, and cancelling the run stops the test process.
+- `editorTools.ts` (Phase 2) and `askUserTool.ts` / `todoTool.ts` / `fetchUrlTool.ts`
+  (Phase 3) stay thin: the runtime injects the ask_user gateway and task-plan
+  sink through the tool context, and `WorkspaceToolExecutor` injects the git /
+  editor / process-manager / network dependencies.
 - `inferenceAgentLoop.ts` has NO per-tool branches: progress copy comes from
   `RegisteredTool.summarize`, execution from the executor, routing from the
   registry.
@@ -285,19 +392,28 @@ available set. No failure ever throws to the user. `finish` sets
 
 ### Resource limits & observability
 Every new tool is capped (files, bytes, results, scanned entries, diagnostics,
-Git files) and reports `{ truncated: true, reason }` instead of silently
-cutting results. `RuntimeManager.logToolExecution` logs one structured line per
+Git files, symbols, definitions, references, problems, test output) and
+reports `{ truncated: true, reason }` instead of silently cutting results. `RuntimeManager.logToolExecution` logs one structured line per
 tool call (name, duration, outcome, result size, cancellation) and never logs
 arguments, file contents, or credentials.
 
 ### Availability
 `src/runtime/tools/toolAvailability.ts` — `AgentMode` (`agent`/`ask`/`plan`)
-maps to tool sets. Not an intent router; never inspects user text.
+maps to tool sets. Not an intent router; never inspects user text. The
+read-only modes (`ask`/`plan`) are **derived from the registry**: every tool
+whose `permission` is `safe` and whose `category` is not `terminal`. The new
+safe git/editor/repository tools therefore join ask/plan automatically, while
+`background_command` (execute/terminal) and the `external` network tools
+(`fetch_url`, `search_web`) stay out.
 
 ### Permission handling
 `src/permissions/permissionManager.ts` + `permissionPolicy.ts`: trust checks,
 auto-allow rules, destructive confirmations, request/resolve lifecycle with
 timeout. RuntimeManager bridges events to the GUI (Allow/Deny buttons).
+Categories are derived from registry permission metadata (`READ`/`MODIFY`/
+`EXECUTE`/`DESTRUCTIVE`, plus `EXTERNAL` for tools registered with the
+`external` permission such as `fetch_url`); auto-allow for `EXTERNAL` is
+off by default and the runtime shield never covers it destructively.
 
 **Authorization pipeline (single definition, `PermissionManager.authorize`):**
 workspace trust gate → explicit deny (category rule) → policy auto-allow →
@@ -677,6 +793,76 @@ compress content). Section state: `AppState.settingsSection`.
   repo states, missing git, not-a-repo, timeout, cancellation) and
   `toolRegistry.extended.test.ts` (registry invariants, duplicate guard,
   generated schemas, progress copy, structured router errors, cancellation).
+- Tool system (Phase 2, 2026-09-30) → `test/unit/runtime/tools/`:
+  `gitDiffTool.test.ts` (scope parsing, unified-diff parsing, safety args,
+  staged/file scope, unborn-HEAD fallback, truncation, typed failures, real
+  repo), `gitLogTool.test.ts` (limit parsing/capping, record parsing + injected-
+  record rejection, subject collapsing, truncation, real repo),
+  `editorTools.test.ts` (fake `EditorContextSource`: identity-only active file,
+  untitled/outside, single/multi selection order, redaction, sensitive-file
+  blanking, truncation, `dependency_unavailable`, `parseMaxChars`),
+  `backgroundProcessManager.test.ts` (fake `spawn`: running/exit/failure/
+  spawn-error, bounded buffers + totals, cancellation never kills a started
+  process, stop/shutdown, retained-process cap, id collision) and
+  `phase2Tools.integration.test.ts` (the actual workflows through the real
+  registry + ToolRouter + WorkspaceToolExecutor: active-file→selection→read,
+  git_status→git_diff, active-file→diagnostics→read→edit→diagnostics,
+  background_command then continued work, option-style args, cancelled request
+  never spawns, plus the registry permission/availability contract).
+- Tool system (Phase 3, 2026-09-30) →
+  `runtime/net/urlSecurity.test.ts` (scheme/host/address policy, private +
+  mapped IPv6 ranges, DNS-based block), `tools/fetchUrlTool.test.ts`
+  (JSON/HTML/plain text, invalid scheme, blocked targets, redirect to private,
+  redirect loop, HTTP error, unsupported content, byte/limit truncation,
+  timeout, network failure, cancellation), `tools/processTools.test.ts`
+  (`get_command_output` bounded lines/bytes + exited process; `kill_command`
+  unknown/ownership/no-op/force), `userInteraction/userQuestionBroker.test.ts`
+  (correlation, multiple pending, stale ids, cancel, session cancel, dispose,
+  id collisions), `tools/askUserTodoTools.test.ts` (ask_user validation +
+  cancellation; update_todo create/update/cancel/clear, duplicate ids, invalid
+  status, item/title caps, per-conversation isolation) and
+  `tools/phase3Tools.integration.test.ts` (background→output→kill, ask_user→
+  response, run-end cancellation, update_todo, fetch_url success + SSRF block,
+  registry/permission contract, and the RuntimeEvent → webview message map).
+- Tool system (Phase 4, 2026-09-30) →
+  `runtime/net/webSearchProvider.test.ts` (stored-provider credential handling,
+  missing key, request building, response parsing/trimming, host label,
+  provider error codes), `tools/searchWebTool.test.ts` (no provider →
+  `dependency_unavailable`, query validation, result cap + truncation, dedupe,
+  clamping, provider-failure mapping, cancellation),
+  `tools/codebaseSearchTool.test.ts` (`tokenize` stopwords, most-relevant-first
+  ranking, no results, ignored dirs + sensitive files never scanned,
+  deterministic cap, validation + cancellation), `tools/repoMapTool.test.ts`
+  (deterministic directory-before-file tree, nested dirs, ignored dirs, depth
+  limit, entry budget truncation, empty workspace, workspace escape),
+  `tools/gitShowTool.test.ts` (commit-ref validation, metadata + files + diff,
+  file-limited show, unavailable/not-a-repo/cancel/timeout, unknown revision →
+  `not_found`, oversized diff, path validation, real repository),
+  `tools/gitBlameTool.test.ts` (`parseBlamePorcelain` ordering, defaulted and
+  bounded ranges, reversed/oversized range → controlled error before git,
+  workspace path validation, unavailable/cancel/timeout, outside-file range,
+  missing path, internal failure, pre-aborted signal, real repository) and
+  `tools/phase4Tools.integration.test.ts` (search_web discovery, codebase_search
+  region, repo_map filtered tree, git_show + git_blame on one runner, typed
+  executor failures, plus the registry permission/availability/validation
+  contract).
+- Tool system (Phase 5, 2026-09-30) →
+  `tools/symbolTools.test.ts` (document symbols, empty result, scope defaults
+  and validation, workspace cap + truncation, workspace escape,
+  `dependency_unavailable`, pre-aborted signal), `tools/navigationTools.test.ts`
+  (definition at position, multiple/none, definitions cap, path/position
+  validation, workspace escape, cancellation, `includeDeclaration` propagation,
+  references cap, strict position parsing), `tools/problemsTool.test.ts`
+  (workspace + per-file queries, summary, severity normalization, cap,
+  scope/path validation, workspace escape, dependency availability),
+  `tools/runTestsTool.test.ts` (runner allow-list, argv validation, timeout
+  bounds, cwd escape rejection, pass/fail runs, timeout kills the child,
+  cancellation stops the process, bounded output, spawn failure →
+  `dependency_unavailable`, pre-aborted → cancelled) and
+  `tools/phase5Tools.integration.test.ts` (all five tools through the real
+  registry/router/executor, host-only behavior without providers,
+  `run_tests` end-to-end and runner rejection, registry
+  permission/availability/validation contract, 35-tool count).
 - **What to test when touching a subsystem:**
   - agent loop → `inferenceAgentLoop.test.ts` + `thinkingSafety` +
     `invalidToolRecovery` (add tool-id lifecycle cases there or in
@@ -756,9 +942,49 @@ compress content). Section state: `AppState.settingsSection`.
     `toolError.ts` instead of raw errors, resolve every path through
     `workspacePath.ts`, and a bounded tool reports `{ truncated: true,
     reason }` rather than silently dropping results.
-27. Inspection tools stay read-only: `git_status` and `get_diagnostics` must
-    never modify the repository or trigger a build, and their output is
-    normalized/redacted before it reaches the model.
+27. Inspection tools stay read-only: `git_status`, `git_diff`, `git_log`,
+    `get_diagnostics`, `get_active_file` and `get_selection` must never modify
+    the repository, the editor, or trigger a build; their output is
+    normalized/redacted before it reaches the model, and git/editor context is
+    always workspace-relative (never an absolute machine path).
+28. A managed background process outlives its tool request on purpose:
+    `background_command` spawns an argv-only process and returns once it is
+    running; cancelling the agent run (or the startup wait) must NOT kill it.
+    Termination is explicit (`BackgroundProcessManager.stop`/`dispose`).
+    Background processes are never persisted, so a restart never touches a
+    stale PID.
+29. Network access is limited to `fetch_url` and `search_web`. `fetch_url`
+    stays SSRF-safe: https only, loopback/private/link-local/cloud-metadata
+    blocked (by literal and by resolved address) on the original URL *and* every
+    redirect, bounded size, redirect count and timeout, script-free HTML
+    extraction, and no cache. `search_web` discovers URLs through the
+    `WebSearchProvider` abstraction, reading its credential lazily from
+    SecretStorage (never webview state, transcripts, or workspace files) and
+    returning only bounded title/url/snippet data; it never fetches a page.
+    Web content, including snippets, is untrusted data for the model and can
+    never modify permissions, tool definitions, credentials, or agent
+    configuration.
+30. A task plan is structured agent state, not chat: `update_todo` state lives
+    in `TaskPlanStore` (extension host, per conversation, in memory) and is
+    never written to the transcript, provider config, credentials, or logs.
+    The webview only receives sanitized snapshots.
+31. `ask_user` is clarification, not authorization: it must never approve a
+    tool or command (the permission manager stays authoritative), pending
+    questions are correlated by `requestId`, and a run ending or the webview
+    disposing resolves them as cancelled so no promise is left hanging.
+32. `run_tests` is the only process tool with a hard-coded allow-list: the
+    runner executable must be one of the approved names (never a path, never a
+    shell), args are argv entries (`shell: false`, so injection is structurally
+    impossible), cwd is workspace-validated, and timeout is capped at 300 s.
+    It must never widen into a generic `run_command` replacement.
+33. VS Code language intelligence (`list_symbols`, `go_to_definition`,
+    `find_references`, `get_problems`) is read-only, host-only, and normalized:
+    the tools talk to `LanguageSource` / `DiagnosticsSource`, never to `vscode`
+    directly, and no vscode URI/Position/Range/Diagnostic/Symbol object is ever
+    serialized into a tool result. Results are plain workspace-relative data.
+34. `get_problems` reports the editor's current diagnostics only. It never
+    runs a compiler/build inside the tool and never invents diagnostics; if a
+    language server has not caught up after an edit, the result says so (`note`).
 
 ## 15. Known Bugs / Limitations
 
@@ -818,8 +1044,33 @@ compress content). Section state: `AppState.settingsSection`.
 
 ### Architectural Risks
 - Tool search runs in-process (no ripgrep/native backend yet) and does not
-  honor `.gitignore` — it uses a built-in ignore set. Both are intentional for
-  Phase 1 and are the top Phase 2 candidates.
+  honor `.gitignore` — it uses a built-in ignore set. Both are intentional and
+  remain the top native-search candidates (Phase 3).
+- `background_command` output is kept in bounded in-memory buffers;
+  `get_command_output`/`kill_command` (Phase 3) layer on the existing
+  `BackgroundProcessManager.output()`/`stop()`/`list()` and never persist
+  output across restarts.
+- `fetch_url` performs direct bounded requests (no cache/ETag/Last-Modified).
+  It rejects `http://` outright (an unencrypted local-network path would widen
+  the SSRF surface), so local dev servers are intentionally out of scope until
+  an explicit local-network policy exists.
+- `search_web` needs a provider credential
+  (`WEB_SEARCH_API_KEY_SECRET_KEY`). Without one it fails as
+  `dependency_unavailable` and the agent can fall back to `fetch_url` on a
+  known URL; it returns snippets only, never page bodies.
+- `codebase_search` ranks lexically (query-term coverage over fixed line
+  chunks) — deterministic and dependency-free, not a semantic/embedding model.
+  A native index can be added later behind the same tool signature without
+  changing the registry or the loop.
+- `git_show`/`git_blame` read the local Git runner only; there is no remote or
+  GitHub API path (no PR/issue context yet).
+- Language tools depend on the *editor's* providers: without a language
+  extension (or outside the extension host) `list_symbols`/
+  `go_to_definition`/`find_references` fail as `dependency_unavailable`, and
+  `get_problems` sees only what the language servers have reported so far.
+- `run_tests` timeout is capped at 300 s; longer suites need
+  `background_command` + `get_command_output`. There is no per-test filtering
+  contract yet — args pass straight to the runner (still argv-only).
 - `gui/src/protocol.ts` and `src/webview/types.ts` can drift (manual sync).
 - `ChatTurn` shape changes must update both runtimes and the serializer —
   TypeScript catches most, but runtime id semantics are only test-enforced.
@@ -897,6 +1148,54 @@ compress content). Section state: `AppState.settingsSection`.
   user-controllable let a read-only selection filter `write_file`/`edit_file`
   out of the available set, and the loop then told the model those tools were
   unknown. Tool availability must never be reachable from the UI.
+- **Background-process lifetime is decoupled from the tool request
+  (2026-09-30)** — `background_command` returns as soon as the process is
+  confirmed running, and cancelling the agent run only stops *waiting*; it
+  never kills a process that already started. A "cancel" that silently killed
+  a dev server would be a destructive surprise, so termination is explicit
+  (`stop`/`dispose`). Output stays in bounded in-memory buffers (never
+  persisted), so a restarted extension never claims a stale PID.
+- **Editor context is injected, never imported (2026-09-30)** — mirrors the
+  diagnostics source: the tools talk to an `EditorContextSource`, VS Code is
+  imported lazily, and only workspace-relative identity plus redacted/capped
+  selection text reaches the model.
+- **fetch_url is https-only SSRF-checked per hop (2026-09-30)** — rather than
+  trusting the first hostname, each redirect target is re-parsed, re-resolved
+  and re-validated, so a public URL cannot bounce the agent onto loopback or a
+  cloud metadata endpoint. No cache was added: a bounded direct request is the
+  right complexity for one URL.
+- **Web search is a provider interface, not a vendor call (2026-09-30)** —
+  `search_web` talks to `WebSearchProvider`; the default implementation is
+  Brave-compatible, reads its key lazily from SecretStorage, and can be
+  replaced without touching the tool, the registry, or the loop. `search_web`
+  and `fetch_url` stay separate by design (discover URLs vs. retrieve a known
+  URL), so a search result is never silently fetched.
+- **codebase_search is lexical, not a vector database (2026-09-30)** — no
+  embedding service or persistent index was introduced. It reuses the existing
+  walker, ignore rules, binary detection and path safety and scores chunks
+  deterministically, so results are bounded and reproducible and a real index
+  can be added later behind the same tool signature.
+- **Git show/blame reuse the Phase 1 runner and Phase 2 parsers (2026-09-30)** —
+  rather than a new Git service, `git_show`/`git_blame` take the same
+  `GitCommandRunner` and the existing log/diff parsers, so they cannot drift
+  from `git_status`/`git_log`/`git_diff`. The model supplies only a validated
+  commit/ref and pathspec; every git flag is chosen by Spider.
+- **ask_user is a broker, not a permission dialog (2026-09-30)** — a
+  request-id-correlated `UserQuestionBroker` bridges an agent turn to the
+  webview and back, with cancellation on run end / webview dispose. It is kept
+  strictly separate from the permission pipeline so a question can never be
+  used to approve a command.
+- **run_tests is allow-listed and manager-owned (2026-09-30)** — the runner
+  comes from a fixed name set and the process lifecycle is the existing
+  `BackgroundProcessManager`'s (a new `whenClosed()` completion wait with
+  graceful-then-forced kill), so verification reuse the Phase 2/3 machinery
+  instead of a second process registry. A shell string cannot be expressed:
+  input is `{runner, args[]}` only.
+- **VS Code objects never cross the tool boundary (2026-09-30)** —
+  `LanguageSource` normalizes symbols/locations into plain JSON
+  (workspace-relative paths, zero-based positions) inside the extension host,
+  exactly like `DiagnosticsSource` and `EditorContextSource` before it. The
+  model can navigate code without ever receiving a live vscode object.
 - **Secrets stay in SecretStorage; config persistence holds no credentials** —
   restore re-attaches the OpenRouter key at activation.
 
@@ -947,16 +1246,61 @@ compress content). Section state: `AppState.settingsSection`.
   all of the above. A composer agent-mode selector was added and then reverted
   (see §15 Fixed) because it gated registered tools out of the model's
   available set.
+- **Completed (2026-09-30, Phase 2 tools):** five new tools (`git_diff`,
+  `git_log`, `get_active_file`, `get_selection`, `background_command`) added
+  through the same registry + executor pattern (no loop branches). Git
+  inspection is argv-only and parsed defensively; editor context is injected
+  (VS Code imported lazily) and returns identity plus redacted/capped selection
+  text; `background_command` runs an argv-only process whose lifetime is
+  decoupled from the tool request (cancel never kills) under a bounded
+  `BackgroundProcessManager` owned by `RuntimeManager` and disposed on
+  deactivate. Cross-linking active-file/selection and git workflows are covered
+  end-to-end through the real registry/router/executor. 502 unit tests / 61
+  files, lint 0 warnings, typecheck + compile green.
+- **Completed (2026-09-30, Phase 3 tools):** five new tools (`get_command_output`,
+  `kill_command`, `ask_user`, `update_todo`, `fetch_url`) added through the same
+  registry + executor pattern (no loop branches). Process tools are thin
+  adapters over the Phase 2 manager (ownership-safe, no arbitrary pid kill);
+  `ask_user` uses an id-correlated broker wired through the tool context and the
+  existing runtime-event → webview bridge (cancel-safe on run end / webview
+  dispose); `update_todo` owns a per-conversation `TaskPlanStore` separate from
+  the transcript; `fetch_url` enforces a per-hop SSRF policy (https only;
+  loopback/private/metadata blocked by literal and by DNS on every redirect)
+  with bounded size/time/redirects and script-free HTML extraction. New protocol
+  messages (`USER_QUESTION`, `USER_QUESTION_CLOSED`, `TODO_UPDATED`,
+  `ANSWER_USER_QUESTION`, `CANCEL_USER_QUESTION`) and a minimal task-plan panel +
+  question prompt. 575 unit tests / 67 files, lint 0 warnings, typecheck +
+  compile green.
+- **Completed (2026-09-30, Phase 4 tools):** five new tools (`search_web`,
+  `codebase_search`, `repo_map`, `git_show`, `git_blame`) added through the same
+  registry + executor pattern (no loop branches, no second permission or
+  cancellation system). `search_web` sits on a `WebSearchProvider` abstraction
+  with its key in SecretStorage; `codebase_search`/`repo_map` reuse the existing
+  walker, ignore set and path safety (no vector DB, no second watcher);
+  `git_show`/`git_blame` reuse the Phase 1 git runner and the Phase 2 log/diff
+  parsers with argv-only commands and a range bounded before git runs. 635 unit
+  tests / 74 files, lint 0 warnings, typecheck + compile green.
+- **Completed (2026-09-30, Phase 5 tools):** five new tools (`list_symbols`,
+  `go_to_definition`, `find_references`, `get_problems`, `run_tests`) added
+  through the same registry + executor pattern (no loop branches). Language
+  intelligence goes through a new `LanguageSource` (lazy `vscode`, provider
+  commands only, everything normalized to plain data); `get_problems` reuses
+  `DiagnosticsSource` and the existing normalizer; `run_tests` is allow-listed
+  (runner name set + argv-only + bounded timeout) and awaits its process via
+  `BackgroundProcessManager.whenClosed()` (timeout/cancel kill reused).
+  Understand → navigate → edit → verify is now covered end to end. 678 unit
+  tests / 79 files, lint 0 warnings, typecheck + compile green. 35 registered
+  tools.
 - **Current:** documentation/context (this file). All checks green:
-  typecheck, lint (0 warnings), 426 unit tests, compile.
-- **Next planned (Phase 2 tools):** git diff/log tools, watch/list symbols,
+  typecheck, lint (0 warnings), 678 unit tests / 79 files, compile. 35 tools.
+- **Next planned (Phase 6 candidates):** browser tools, MCP, subagents,
   a native (ripgrep-style) search backend behind the existing search module,
-  `.gitignore` support in the walker, and a web/network tool with the same
-  permission + limit discipline. Also: per-conversation titles; a profile manager UI (the
-  backend already supports multiple profiles; Settings exposes one connection
-  per provider today); workspace indexing (reserved Settings section exists,
-  honestly marked); agent behaviour settings if/when the backend supports
-  them.
+  `.gitignore` support in the walker, an optional index behind
+  `codebase_search`, watch/list-symbols watchers, per-conversation titles / a
+  profile manager UI (the backend already supports multiple profiles; Settings
+  exposes one connection per provider today); workspace indexing (reserved
+  Settings section exists, honestly marked); agent behaviour settings if/when
+  the backend supports them.
 - **Blockers:** none known.
 
 ## 18. AI Agent Instructions

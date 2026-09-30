@@ -1,7 +1,5 @@
-import type { RuntimeToolCall } from "../runtimeTypes";
-import { DESTRUCTIVE_TOOL_NAMES, EXECUTE_TOOL_NAMES, LOCAL_TOOL_NAMES, MODIFY_TOOL_NAMES, READ_TOOL_NAMES } from "./toolRegistry";
-
-export { DESTRUCTIVE_TOOL_NAMES, EXECUTE_TOOL_NAMES, LOCAL_TOOL_NAMES, MODIFY_TOOL_NAMES, READ_TOOL_NAMES };
+import type { RuntimeToolCall } from "../runtimeTypes";import { DESTRUCTIVE_TOOL_NAMES, EXECUTE_TOOL_NAMES, EXTERNAL_TOOL_NAMES, LOCAL_TOOL_NAMES, MODIFY_TOOL_NAMES, READ_TOOL_NAMES } from "./toolRegistry";
+export { DESTRUCTIVE_TOOL_NAMES, EXECUTE_TOOL_NAMES, EXTERNAL_TOOL_NAMES, LOCAL_TOOL_NAMES, MODIFY_TOOL_NAMES, READ_TOOL_NAMES };
 
 export const LOCAL_AGENT_SYSTEM_PROMPT = `You are Spider, a coding agent operating as an autonomous agent inside the user's workspace.
 
