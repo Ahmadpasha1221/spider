@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none'; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; img-src {{cspSource}} data:;">
+  <title>Spider History</title>
+  <link rel="stylesheet" href="{{styleUri}}">
+</head>
+
+<body class="history-body">
+  <div id="history-app">
+    <header class="history-header">
+      <h1>Conversation history</h1>
+      <p class="hint">Select a conversation to open it in the sidebar. The preview is read-only.</p>
+    </header>
+    <div class="history-layout">
+      <div class="history-list-pane">
+        <div id="history-list" class="history-list" role="list"></div>
+        <p id="history-empty" class="history-empty" hidden>No conversations yet. Start one from the Spider sidebar.</p>
+      </div>
+      <section class="history-preview" aria-label="Conversation preview">
+        <div id="history-preview-body" class="history-preview-body"></div>
+        <p id="history-preview-empty" class="history-empty">Select a conversation to preview it.</p>
+      </section>
+    </div>
+  </div>
+  <script nonce="{{nonce}}" src="{{scriptUri}}"></script>
+</body>
+
+</html>

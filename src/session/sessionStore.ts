@@ -1,9 +1,10 @@
 import * as vscode from "vscode";
 import { RuntimeProvider } from "../runtime/runtimeTypes";
 import { AgentErrorInfo, AgentSession, AgentStatus } from "../agent/agentSession";
+import { STORAGE_KEYS, readState } from "../shared/storageKeys";
 
-const SESSIONS_STORAGE_KEY = "codeviaCursor.sessions";
-const ACTIVE_SESSION_STORAGE_KEY = "codeviaCursor.activeSession";
+const SESSIONS_STORAGE_KEY = STORAGE_KEYS.sessions.current;
+const ACTIVE_SESSION_STORAGE_KEY = STORAGE_KEYS.activeSession.current;
 
 const AGENT_STATUSES: readonly AgentStatus[] = [
   "IDLE",
@@ -28,7 +29,7 @@ export class SessionStore {
   constructor(private readonly workspaceState: vscode.Memento) {}
 
   loadSessions(): AgentSession[] {
-    const raw = this.workspaceState.get<unknown>(SESSIONS_STORAGE_KEY, []);
+    const raw = readState<unknown>(this.workspaceState, STORAGE_KEYS.sessions, []);
     if (!Array.isArray(raw)) {
       return [];
     }
@@ -40,7 +41,7 @@ export class SessionStore {
   }
 
   loadActiveSessionId(): string | undefined {
-    const sessionId = this.workspaceState.get<unknown>(ACTIVE_SESSION_STORAGE_KEY);
+    const sessionId = readState<unknown>(this.workspaceState, STORAGE_KEYS.activeSession);
     return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
   }
 

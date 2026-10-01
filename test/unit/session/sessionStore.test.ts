@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../../../src/agent/agentSession";
 import { SessionStore } from "../../../src/session/sessionStore";
 
-const SESSIONS_KEY = "codeviaCursor.sessions";
-const ACTIVE_SESSION_KEY = "codeviaCursor.activeSession";
+const SESSIONS_KEY = "spider.sessions";
+const ACTIVE_SESSION_KEY = "spider.activeSession";
 
 function createMemento(values: Record<string, unknown> = {}) {
   return {
@@ -18,7 +18,7 @@ describe("SessionStore", () => {
     const store = new SessionStore(workspaceState);
 
     expect(store.loadSessions()).toEqual([]);
-    expect(workspaceState.get).toHaveBeenCalledWith(SESSIONS_KEY, []);
+    expect(workspaceState.get).toHaveBeenCalledWith(SESSIONS_KEY);
   });
 
   it("deserializes stored sessions and dates", () => {

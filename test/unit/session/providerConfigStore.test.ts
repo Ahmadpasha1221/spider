@@ -36,7 +36,10 @@ function createMemento(values: Record<string, unknown> = {}) {
   };
 }
 
+/** Pre-rename key: migration source, read through the storage fallback. */
 const LEGACY_KEY = "codeviaCursor.providerConfig";
+/** Current key the active profile is projected into. */
+const PROJECTION_KEY = "spider.providerConfig";
 
 describe("ProviderConfigStore", () => {
   it("returns undefined when nothing is saved", () => {
@@ -57,9 +60,9 @@ describe("ProviderConfigStore", () => {
 
     await store.save(config);
 
-    // The legacy projection stays exactly as it was: older builds and every
-    // existing consumer keep working.
-    const persisted = values[LEGACY_KEY] as Record<string, unknown>;
+    // The single-slot projection is written under the current key; the
+    // pre-rename key is only read as a fallback.
+    const persisted = values[PROJECTION_KEY] as Record<string, unknown>;
     expect(persisted).toEqual({
       provider: "openai-compatible",
       baseUrl: "http://127.0.0.1:1234/v1",
