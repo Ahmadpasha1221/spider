@@ -1,9 +1,9 @@
 {
-  "name": "codevia-cursor",
+  "name": "spider",
   "displayName": "Spider",
   "version": "0.1.0",
   "publisher": "Ahmadpasha1221",
-  "description": "A production-quality VS Code AI coding agent using the official Cursor TypeScript SDK.",
+  "description": "An autonomous AI coding agent for VS Code. Use your own model through Ollama, OpenAI-compatible servers, OpenRouter, or Cursor agents, with workspace tools, permissions, streaming, planning, and verification.",
   "license": "MIT",
   "engines": {
     "vscode": "^1.95.0",
@@ -14,11 +14,15 @@
     "Machine Learning"
   ],
   "keywords": [
-    "cursor",
     "ai",
-    "agent",
     "coding",
-    "cursor-sdk"
+    "agent",
+    "code assistant",
+    "ollama",
+    "openrouter",
+    "openai",
+    "local ai",
+    "cursor"
   ],
   "icon": "assets/icon.png",
   "galleryBanner": {
@@ -37,14 +41,17 @@
     "ui"
   ],
   "activationEvents": [
-    "onView:codeviaCursor.agent",
-    "onCommand:codeviaCursor.openAgent",
-    "onCommand:codeviaCursor.openSettings"
+    "onView:spider.agent",
+    "onCommand:spider.openAgent",
+    "onCommand:spider.openAgentEditor",
+    "onCommand:spider.openSettings",
+    "onCommand:spider.openHistory",
+    "onChatParticipant:spider.spider"
   ],
   "authentication": {
     "providers": [
       {
-        "id": "codeviaCursor",
+        "id": "spider",
         "label": "Spider",
         "supportsMultipleAccounts": false
       }
@@ -54,7 +61,7 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "codeviaCursor",
+          "id": "spider",
           "title": "Spider",
           "icon": "assets/spider-icon.png"
         }
@@ -62,26 +69,36 @@
     },
     "chatParticipants": [
       {
-        "id": "codeviaCursor.spider",
+        "id": "spider.spider",
         "name": "spider",
         "fullName": "Spider",
-        "description": "AI coding agent powered by Cursor SDK",
+        "description": "Autonomous AI coding agent for your VS Code workspace.",
         "isSticky": true,
         "commands": [
-          { "name": "explain", "description": "Explain selected code" },
-          { "name": "fix", "description": "Fix issues in selection" },
-          { "name": "test", "description": "Generate tests" }
+          {
+            "name": "explain",
+            "description": "Explain selected code"
+          },
+          {
+            "name": "fix",
+            "description": "Fix issues in selection"
+          },
+          {
+            "name": "test",
+            "description": "Generate tests"
+          }
         ]
       }
-    ],"configuration": {
+    ],
+    "configuration": {
       "title": "Spider",
       "properties": {
-        "codeviaCursor.model": {
+        "spider.model": {
           "type": "string",
           "default": "",
           "description": "Model used by the Spider agent."
         },
-        "codeviaCursor.autoApply": {
+        "spider.autoApply": {
           "type": "boolean",
           "default": false,
           "description": "Automatically apply edits from the agent."
@@ -89,10 +106,10 @@
       }
     },
     "views": {
-      "codeviaCursor": [
+      "spider": [
         {
           "type": "webview",
-          "id": "codeviaCursor.agent",
+          "id": "spider.agent",
           "name": "Agent",
           "icon": "assets/icon.png"
         }
@@ -100,13 +117,23 @@
     },
     "commands": [
       {
-        "command": "codeviaCursor.openAgent",
+        "command": "spider.openAgent",
         "title": "Open Agent",
         "category": "Spider"
       },
       {
-        "command": "codeviaCursor.openSettings",
+        "command": "spider.openAgentEditor",
+        "title": "Open Agent Editor",
+        "category": "Spider"
+      },
+      {
+        "command": "spider.openSettings",
         "title": "Open Settings",
+        "category": "Spider"
+      },
+      {
+        "command": "spider.openHistory",
+        "title": "Open History",
         "category": "Spider"
       }
     ]
@@ -119,18 +146,19 @@
     "lint": "eslint src test gui --max-warnings 0",
     "format": "prettier --write .",
     "test": "vitest run",
+    "test:vsix": "node scripts/vsixSmokeTest.mjs",
     "test:integration": "vscode-test",
     "vscode:prepublish": "pnpm run typecheck && pnpm run lint && pnpm run compile",
-    "package": "vsce package --no-dependencies"
+    "package": "pnpm run vscode:prepublish && node scripts/stage-vsix.js"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.31"
+    "@cursor/sdk": "1.0.35"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.5",
     "@types/mocha": "^10.0.0",
     "@types/node": "^22.13.0",
     "@types/vscode": "^1.95.0",
-    "@eslint/js": "^9.39.5",
     "@typescript-eslint/eslint-plugin": "^8.22.0",
     "@typescript-eslint/parser": "^8.22.0",
     "@typescript-eslint/utils": "^8.22.0",
