@@ -3,7 +3,7 @@ import { COMMANDS, EXTENSION_ID, EXTENSION_NAME } from "../../../src/shared/cons
 
 describe("constants", () => {
   it("exports the extension id", () => {
-    expect(EXTENSION_ID).toBe("codevia-cursor");
+    expect(EXTENSION_ID).toBe("spider");
   });
 
   it("exports the extension display name", () => {
@@ -11,7 +11,7 @@ describe("constants", () => {
   });
 
   it("exports stable command ids", () => {
-    expect(COMMANDS.openAgent).toBe("codeviaCursor.openAgent");
-    expect(COMMANDS.openSettings).toBe("codeviaCursor.openSettings");
+    expect(COMMANDS.openAgent).toBe("spider.openAgent");
+    expect(COMMANDS.openSettings).toBe("spider.openSettings");
   });
 });

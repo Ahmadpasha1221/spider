@@ -16,10 +16,24 @@ export interface CreateAgentOptions {
 
 export class CursorClient {
   private apiKey: string | undefined;
+  private sdkConfigured = false;
 
   constructor(apiKey: string | undefined) {
     this.apiKey = apiKey;
+  }
+
+  /**
+   * configureCursorSdk is deferred until the first SDK call. Extension
+   * activation must never depend on the Cursor runtime: commands and views
+   * register before any Cursor state is touched, and a missing/broken Cursor
+   * environment only degrades the Cursor provider, not the whole extension.
+   */
+  private ensureSdkConfigured(): void {
+    if (this.sdkConfigured) {
+      return;
+    }
     configureCursorSdk({});
+    this.sdkConfigured = true;
   }
 
   hasApiKey(): boolean {
@@ -73,6 +87,7 @@ export class CursorClient {
     nameOrOptions: string | CreateAgentOptions,
     workspacePath?: string,
   ): Promise<SDKAgent> {
+    this.ensureSdkConfigured();
     const options = typeof nameOrOptions === "string"
       ? { name: nameOrOptions, workspacePath: workspacePath ?? "." }
       : nameOrOptions;
@@ -95,6 +110,7 @@ export class CursorClient {
   }
 
   async getAgent(agentId: string): Promise<SDKAgentInfo> {
+    this.ensureSdkConfigured();
     try {
       return await Agent.get(agentId, { apiKey: this.apiKey });
     } catch (error) {
@@ -103,6 +119,7 @@ export class CursorClient {
   }
 
   async listAgents(): Promise<SDKAgentInfo[]> {
+    this.ensureSdkConfigured();
     try {
       const result = await Agent.list();
       return result.items;
@@ -112,6 +129,7 @@ export class CursorClient {
   }
 
   async resumeAgent(agentId: string): Promise<SDKAgent> {
+    this.ensureSdkConfigured();
     try {
       return await Agent.resume(agentId, { apiKey: this.apiKey });
     } catch (error) {

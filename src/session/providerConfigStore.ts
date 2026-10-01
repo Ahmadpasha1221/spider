@@ -1,13 +1,13 @@
 import * as vscode from "vscode";
 import type { RuntimeProviderConfig } from "../runtime/runtimeTypes";
+import { STORAGE_KEYS, readState } from "../shared/storageKeys";
 
 /**
- * Legacy single-slot key: still read (migration source) and still written (the
- * active profile is projected into it) so nothing downstream breaks.
+ * Single-slot key: still read (migration source, and a fallback for the
+ * pre-rename `codeviaCursor.providerConfig`) and still written (the active
+ * profile is projected into it) so nothing downstream breaks.
  */
-const LEGACY_PROVIDER_CONFIG_STORAGE_KEY = "codeviaCursor.providerConfig";
-/** Profile list. Non-secret data only — credentials live in SecretStorage. */
-const PROVIDER_PROFILES_STORAGE_KEY = "codeviaCursor.providerProfiles";
+const PROVIDER_CONFIG_STORAGE_KEY = STORAGE_KEYS.providerConfig.current;
 
 /**
  * A provider profile is the non-secret half of a connection: which provider,
@@ -98,7 +98,7 @@ export class ProviderConfigStore {
 
   /** All profiles plus the active one, migrating the legacy record on first read. */
   loadProfiles(): ProviderProfileState {
-    const raw = this.workspaceState.get<unknown>(PROVIDER_PROFILES_STORAGE_KEY);
+    const raw = readState<unknown>(this.workspaceState, STORAGE_KEYS.providerProfiles);
     if (isRecord(raw) && Array.isArray(raw.profiles)) {
       const profiles = raw.profiles.map(toProviderProfile).filter((profile): profile is ProviderProfile => profile !== undefined);
       if (profiles.length > 0) {
@@ -158,7 +158,7 @@ export class ProviderConfigStore {
 
   /** Persists the profile list and keeps the legacy projection in sync. */
   async saveProfiles(state: ProviderProfileState): Promise<void> {
-    await this.workspaceState.update(PROVIDER_PROFILES_STORAGE_KEY, {
+    await this.workspaceState.update(STORAGE_KEYS.providerProfiles.current, {
       profiles: state.profiles.map(toPlainProfile),
       ...(state.activeProfileId ? { activeProfileId: state.activeProfileId } : {}),
     });
@@ -167,7 +167,7 @@ export class ProviderConfigStore {
     if (!active) {
       return;
     }
-    await this.workspaceState.update(LEGACY_PROVIDER_CONFIG_STORAGE_KEY, {
+    await this.workspaceState.update(PROVIDER_CONFIG_STORAGE_KEY, {
       provider: active.provider,
       ...(active.modelId ? { modelId: active.modelId } : {}),
       ...(active.baseUrl ? { baseUrl: active.baseUrl } : {}),
@@ -195,7 +195,7 @@ export class ProviderConfigStore {
   }
 
   private loadLegacy(): PersistedProviderConfig | undefined {
-    const raw = this.workspaceState.get<unknown>(LEGACY_PROVIDER_CONFIG_STORAGE_KEY);
+    const raw = readState<unknown>(this.workspaceState, STORAGE_KEYS.providerConfig);
     if (!isRecord(raw) || typeof raw.provider !== "string" || raw.provider.length === 0) {
       return undefined;
     }

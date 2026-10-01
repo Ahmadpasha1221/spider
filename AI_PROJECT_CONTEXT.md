@@ -11,7 +11,9 @@
 
 - **What it is:** Spider (package id `codevia-cursor`, VS Code publisher
   `codevia`) is a VS Code extension providing an AI coding-agent experience
-  inside the sidebar as a webview view (`codeviaCursor.agent`).
+  as an **editor-area tab** (Codex / Cline / Kilo style, `spider.openAgent`
+  / `spider.openAgentEditor`) plus the same agent in the activity-bar
+  sidebar webview view (`codeviaCursor.agent`).
 - **Primary purpose:** a coding agent that chats, calls workspace tools
   (read/write/edit/list/search/move/delete files, run commands), and streams
   its progress — modeled on Continue / Roo Code / Cline UX.
@@ -27,7 +29,10 @@
   Settings IA (sidebar sections), Spider watermark empty state** (2026-09-27),
   **chat-UI redesign: Copy/Delete message actions with stable transcript ids,
   collapsible tool/command output, live command stdout/stderr streaming**
-  (2026-09-28).
+  (2026-09-28), **editor-area Spider tab (Codex/Cline/Kilo style) sharing
+  one AgentWebviewHost with the sidebar, clickable Spider logo header
+  button + status-bar item that opens/focuses the tab, History as a real
+  editor tab** (2026-09-29).
 - **Identity note:** internal identifiers (`codeviaCursor`, `CodeviaSession`,
   storage keys `codeviaCursor.*`, package name `codevia-cursor`) intentionally
   keep the old name. Only user-facing strings say "Spider". Do NOT rename
@@ -38,9 +43,10 @@
 Actual implemented flow (verified against source):
 
 ```
-User (webview GUI, gui/src/main.ts)
+User (webview GUI, gui/src/main.ts — sidebar view OR editor tab)
   ↓  GuiToHost messages (bridge.ts postMessage)
-AgentViewProvider (src/webview/agentViewProvider.ts)
+AgentWebviewHost (src/webview/agentWebviewHost.ts) ← every surface; OPEN_HISTORY /
+  OPEN_AGENT_EDITOR (clickable Spider logo) handled here
   ↓
 MessageRouter (src/webview/messageRouter.ts)      ← validates every message shape
   ↓
@@ -570,10 +576,23 @@ views, batches UI syncs (`scheduleUiSync` → one rAF per event burst).
 `GuiToHost` messages (SEND_PROMPT, NEW_SESSION, SELECT_SESSION,
 GET_TRANSCRIPT, CONNECT_*, SELECT_*_MODEL, APPROVE/DENY_PERMISSION,
 SET_RUNTIME_AUTO_APPROVE, GET/SET_PERMISSION_RULE, GET_EXTENSION_INFO, ...)
-→ `AgentViewProvider.onDidReceiveMessage` → `MessageRouter.handleMessage`
-(result forwarded back if `shouldForwardResult`). Runtime events flow
-continuously: `RuntimeManager.onDidPublishEvent` → `toRuntimeExtensionMessage`
-→ `webview.postMessage`.
+→ `AgentWebviewHost.attach` (sidebar view or editor tab) →
+`MessageRouter.handleMessage` (result forwarded back if
+`shouldForwardResult`). Runtime events flow continuously:
+`RuntimeManager.onDidPublishEvent` → `toRuntimeExtensionMessage` →
+`AgentWebviewHost.postMessage` → **every attached surface** (sidebar and
+editor tab stay in sync, side by side).
+
+**Editor-area tab (2026-09-29):** `AgentEditorPanel` is a
+`WebviewPanel` (`spider.agentEditor`, tab title "Spider Agent",
+`panel.iconPath` = the spider mark) hosting the SAME GUI through the
+shared host. The clickable Spider logo in the webview header
+(`brand-btn` → `OPEN_AGENT_EDITOR`) and the status-bar Spider item both
+call `AgentEditorPanel.createOrShow` (singleton; reveals when open).
+`AgentViewProvider` (sidebar) only attaches its webview to the same
+host — it owns no webview logic. History is a second `WebviewPanel`
+(`HistoryPanel`); picking a conversation loads the transcript in the
+editor tab (or focuses the sidebar when no tab is open).
 
 ### Execution UI
 Tool/command lifecycle rendered as exec boxes: `tool_requested → running →

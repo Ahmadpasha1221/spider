@@ -16,13 +16,18 @@ const extensionOptions = {
   logLevel: "info",
 };
 
+/**
+ * Two webview clients share one stylesheet: the sidebar Agent view (`main.ts`)
+ * and the History editor tab (`history.ts`). Multiple entry points require an
+ * outdir; both land next to the copied HTML/CSS in dist/gui.
+ */
 const guiOptions = {
-  entryPoints: ["gui/src/main.ts"],
+  entryPoints: ["gui/src/main.ts", "gui/src/history.ts"],
   bundle: true,
   platform: "browser",
   target: "es2022",
   format: "iife",
-  outfile: "dist/gui/main.js",
+  outdir: "dist/gui",
   sourcemap: true,
   logLevel: "info",
 };
@@ -31,6 +36,7 @@ function copyGuiAssets() {
   const outDir = path.join("dist", "gui");
   fs.mkdirSync(outDir, { recursive: true });
   fs.copyFileSync(path.join("gui", "index.html"), path.join(outDir, "index.html"));
+  fs.copyFileSync(path.join("gui", "history.html"), path.join(outDir, "history.html"));
   fs.copyFileSync(path.join("gui", "styles", "main.css"), path.join(outDir, "main.css"));
   // Spider mark for the empty-chat watermark (single asset, no duplication).
   fs.copyFileSync(path.join("assets", "spider-icon.png"), path.join(outDir, "spider-icon.png"));

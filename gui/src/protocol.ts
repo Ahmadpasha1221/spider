@@ -36,6 +36,12 @@ export type GuiToHost =
   | { type: "SELECT_OPENROUTER_MODEL"; modelId: string }
   | { type: "GET_AUTH_STATUS" }
   | { type: "LIST_SESSIONS" }
+  /** Opens the conversation History editor tab. */
+  | { type: "OPEN_HISTORY" }
+  /** Clicking the Spider logo opens (or focuses) the Spider editor tab. */
+  | { type: "OPEN_AGENT_EDITOR" }
+  /** History tab: permanently removes a conversation and its transcript. */
+  | { type: "DELETE_SESSION"; sessionId: string }
   | { type: "GET_TRANSCRIPT"; sessionId: string }
   | { type: "GET_RUNTIME_STATUS" }
   | { type: "SELECT_RUNTIME"; provider: RuntimeProvider; modelId?: string }

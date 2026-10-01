@@ -1,4 +1,5 @@
 import type { SecretStorage } from "./secretStorage";
+import { deleteSecret, providerSecretKeyPair, readSecret } from "../shared/storageKeys";
 
 /**
  * Generic credential layer for provider profiles.
@@ -8,7 +9,7 @@ import type { SecretStorage } from "./secretStorage";
  * resolves "the credential for this profile" and nothing else.
  */
 export function providerSecretKey(profileId: string): string {
-  return `codeviaCursor.provider.${profileId}.apiKey`;
+  return providerSecretKeyPair(profileId).current;
 }
 
 export interface ProviderCredentialStore {
@@ -34,8 +35,10 @@ export function createProviderCredentialStore(
 
   return {
     async get(profileId) {
-      const value = await secrets.get(providerSecretKey(profileId));
-      if (value && value.length > 0) {
+      // New (`spider.provider.<id>`), then pre-rename
+      // (`codeviaCursor.provider.<id>`), then any shape-mismatched legacy key.
+      const value = await readSecret(secrets, providerSecretKeyPair(profileId));
+      if (value !== undefined) {
         return value;
       }
       const legacyKey = legacyKeyFor(profileId);
@@ -47,9 +50,10 @@ export function createProviderCredentialStore(
     },
 
     async store(profileId, secret) {
-      await secrets.store(providerSecretKey(profileId), secret);
-      // The profile slot now holds the credential: drop the legacy key so the
-      // secret exists in exactly one place.
+      await secrets.store(providerSecretKeyPair(profileId).current, secret);
+      // The profile slot now holds the credential: drop the pre-rename slot and
+      // any shape-mismatched legacy key so the secret exists in exactly one place.
+      await secrets.delete(providerSecretKeyPair(profileId).legacy);
       const legacyKey = legacyKeyFor(profileId);
       if (legacyKey) {
         await secrets.delete(legacyKey);
@@ -57,7 +61,7 @@ export function createProviderCredentialStore(
     },
 
     async delete(profileId) {
-      await secrets.delete(providerSecretKey(profileId));
+      await deleteSecret(secrets, providerSecretKeyPair(profileId));
       const legacyKey = legacyKeyFor(profileId);
       if (legacyKey) {
         await secrets.delete(legacyKey);

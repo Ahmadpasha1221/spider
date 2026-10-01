@@ -57,7 +57,7 @@ describe("MessageRouter OpenRouter", () => {
     expect(JSON.stringify(result)).not.toContain("sk-or-test");
     // Credentials are keyed by profile id; the legacy single key is migrated
     // away on the first write (see messageRouter.providerProfiles.test.ts).
-    expect(secrets.store).toHaveBeenCalledWith("codeviaCursor.provider.openrouter-default.apiKey", "sk-or-test");
+    expect(secrets.store).toHaveBeenCalledWith("spider.provider.openrouter-default.apiKey", "sk-or-test");
     expect(secrets.delete).toHaveBeenCalledWith("codeviaCursor.openrouter.key");
   });
 

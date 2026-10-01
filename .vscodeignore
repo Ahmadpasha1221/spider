@@ -1,20 +1,38 @@
+# Source and build tooling (rebuilt by esbuild, never shipped).
 src/
 test/
+gui/
+docs/
+scripts/
+esbuild.js
+
+# Dev config.
 .vscode/
 .github/
-docs/
-gui/
-esbuild.js
-eslint.config.js
+.kilo/
+.freebuff/
+.vscode-test.mjs
+eslint.config.mjs
 prettier.config.js
 vitest.config.ts
 tsconfig.json
 tsconfig.gui.json
 tsconfig.test.json
+
+# Repo/dev artifacts that must never ship in a VSIX.
+.gitignore
+.vscodeignore
+.vsix-stage/
+pnpm-lock.yaml
+AI_PROJECT_CONTEXT.md
+CONTRIBUTING.md
+asked.txt
+shielded.txt
+
+# Maps are dev-only; the compiled bundles stay.
 **/*.map
 **/*.test.ts
-node_modules/@cursor/sdk/dist/cjs/**
-node_modules/@cursor/sdk/dist/esm/**
-node_modules/@cursor/sdk/dist/bundled/**
-node_modules/@cursor/sdk/README.md
-node_modules/@cursor/sdk/LICENSE.md
+
+# NOTE: runtime dependencies (node_modules, incl. @cursor/sdk and its
+# @cursor/sdk-<platform> native packages) are staged and packaged by
+# scripts/stage-vsix.js — see that file before changing anything here.

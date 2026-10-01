@@ -34,6 +34,12 @@ export type WebviewMessage =
   | { type: "DENY_PERMISSION"; requestId: string }
   | { type: "TRY_AGAIN"; sessionId: string }
   | { type: "LIST_SESSIONS" }
+  /** Opens the conversation History editor tab. */
+  | { type: "OPEN_HISTORY" }
+  /** Clicking the Spider logo opens (or focuses) the editor-area tab. */
+  | { type: "OPEN_AGENT_EDITOR" }
+  /** History tab: permanently removes a conversation and its transcript. */
+  | { type: "DELETE_SESSION"; sessionId: string }
   /** Composer shield: enable/disable the temporary runtime auto-approve. */
   | { type: "SET_RUNTIME_AUTO_APPROVE"; enabled: boolean; scope?: "conversation" | "runtime" }
   | { type: "GET_PERMISSION_RULES" }

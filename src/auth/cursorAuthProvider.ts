@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { SecretStorage } from "./secretStorage";
 import { CursorAuthError } from "./cursorAuthError";
+import { SECRET_KEYS, deleteSecret, readSecret } from "../shared/storageKeys";
 
 export class CursorAuthProvider implements vscode.AuthenticationProvider {
   private readonly emitter = new vscode.EventEmitter<vscode.AuthenticationProviderAuthenticationSessionsChangeEvent>();
@@ -19,7 +20,7 @@ export class CursorAuthProvider implements vscode.AuthenticationProvider {
     scopes: readonly string[],
     _options: vscode.AuthenticationProviderSessionOptions,
   ): Promise<vscode.AuthenticationSession> {
-    const token = await this.secretStorage.get("codeviaCursor.token");
+    const token = await readSecret(this.secretStorage, SECRET_KEYS.cursorApiKey);
 
     if (!token) {
       throw new CursorAuthError("No Cursor API key found", 401);
@@ -33,7 +34,7 @@ export class CursorAuthProvider implements vscode.AuthenticationProvider {
     };
 
     this.sessions.push(session);
-    await this.secretStorage.store("codeviaCursor.session", JSON.stringify(session));
+    await this.secretStorage.store(SECRET_KEYS.cursorSession.current, JSON.stringify(session));
     this.emitter.fire({ added: [session], removed: undefined, changed: undefined });
     return session;
   }
@@ -49,7 +50,7 @@ export class CursorAuthProvider implements vscode.AuthenticationProvider {
     }
 
     const [removed] = this.sessions.splice(index, 1);
-    await this.secretStorage.delete("codeviaCursor.session");
+    await deleteSecret(this.secretStorage, SECRET_KEYS.cursorSession);
     this.emitter.fire({ added: undefined, removed: [removed], changed: undefined });
   }
 

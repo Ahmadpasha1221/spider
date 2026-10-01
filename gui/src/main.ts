@@ -3,7 +3,6 @@ import type { HostToGui, RuntimeProvider, SessionListItem, PermissionRule, Permi
 import { AppState, ChatLine, createInitialState, phaseFromAgentState, type SettingsSection } from "./state";
 import { createComposer } from "./components/composer";
 import { createMessageList } from "./components/messageList";
-import { createSessionBar } from "./components/sessionBar";
 import { createQuestionPrompt, createTodoPanel } from "./components/agentPanels";
 import { renderChatView } from "./views/chatView";
 import { renderSettingsView } from "./views/settingsView";
@@ -30,8 +29,11 @@ function isStaleTranscript(sessionId: string): boolean {
 }
 
 const runtimePill = mustEl("runtime-pill");
+const brandBtn = mustEl("brand-btn") as HTMLButtonElement;
 const settingsBtn = mustEl("settings-btn") as HTMLButtonElement;
 const settingsBack = mustEl("settings-back") as HTMLButtonElement;
+const historyBtn = mustEl("history-btn") as HTMLButtonElement;
+const newSessionBtn = mustEl("new-session-btn") as HTMLButtonElement;
 const setupBanner = mustEl("setup-banner");
 const settingsView = mustEl("settings-view");
 const chatView = mustEl("chat-view");
@@ -39,7 +41,6 @@ const providerSettings = mustEl("provider-settings");
 const authFeedback = mustEl("auth-feedback");
 const messageListRoot = mustEl("message-list");
 const composerRoot = mustEl("composer");
-const sessionBarRoot = mustEl("session-bar");
 
 const messageList = createMessageList(messageListRoot, {
   onAllowPermission: (requestId) => resolvePermission(requestId, "ALLOW"),
@@ -56,9 +57,6 @@ const composer = createComposer(composerRoot, {
   onRetry: retryLastPrompt,
   onModelSelect: selectModelFromComposer,
   onToggleAutoApprove: toggleAutoApprove,
-});
-const sessionBar = createSessionBar(sessionBarRoot, {
-  onCreate: () => startNewConversation(),
 });
 
 // Phase 3 surfaces: a task-plan panel and an ask_user prompt. Both mirror
@@ -83,8 +81,20 @@ settingsBack.addEventListener("click", () => {
   state.view = "chat";
   render();
 });
+// New conversation lives as a "+" in the header (top-right); History opens a
+// dedicated editor tab rather than occupying sidebar space.
+newSessionBtn.addEventListener("click", () => startNewConversation());
+historyBtn.addEventListener("click", () => postToHost({ type: "OPEN_HISTORY" }));
+// Clicking the Spider logo opens (or focuses) the Spider editor tab.
+brandBtn.addEventListener("click", () => postToHost({ type: "OPEN_AGENT_EDITOR" }));
 
 onHostMessage(handleHostMessage);
+// The host carries a pending "show Settings" request in the HTML
+// (meta tag) so a freshly created webview opens in Settings even
+// before the first postMessage round-trip.
+if (document.querySelector('meta[name="spider-show-settings"]')?.getAttribute("content") === "1") {
+  state.view = "settings";
+}
 postToHost({ type: "GET_AUTH_STATUS" });
 postToHost({ type: "GET_RUNTIME_STATUS" });
 postToHost({ type: "LIST_SESSIONS" });
@@ -474,7 +484,7 @@ function render(): void {
 
   if (!showSettings) {
     renderSetupBanner();
-    sessionBar.update(state.running);
+    newSessionBtn.disabled = state.running;
     renderChatView(
       { composer },
       state,

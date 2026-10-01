@@ -1,6 +1,7 @@
 node_modules/
 dist/
 out/
+.vsix-stage/
 .vscode-test/
 *.vsix
 .DS_Store
@@ -9,3 +10,5 @@ Thumbs.db
 .env.*
 !.env.example
 coverage/
+asked.txt
+shielded.txt

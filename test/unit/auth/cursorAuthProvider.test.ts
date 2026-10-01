@@ -40,7 +40,7 @@ describe("CursorAuthProvider", () => {
     expect(session.accessToken).toBe("token");
     expect(session.scopes).toEqual(["api"]);
     expect(secretStorage.store).toHaveBeenCalledWith(
-      "codeviaCursor.session",
+      "spider.session",
       expect.stringContaining("token"),
     );
   });

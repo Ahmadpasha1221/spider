@@ -11,7 +11,8 @@ import { createProviderCredentialStore, type ProviderCredentialStore } from "../
 import { profileIdFor } from "../session/providerConfigStore";
 import type { PermissionManager } from "../permissions/permissionManager";
 import { isPermissionRule, isPermissionRuleCategory } from "./permissionRules";
-import { EXTENSION_VERSION, OPENROUTER_API_KEY_SECRET_KEY } from "../shared/constants";
+import { EXTENSION_VERSION } from "../shared/constants";
+import { SECRET_KEYS } from "../shared/storageKeys";
 import {
   AgentState,
   ExtensionMessage,
@@ -44,7 +45,7 @@ export class MessageRouter {
     this.permissionManager = dependencies?.permissionManager;
     this.providerCredentials = openRouterSecrets
       ? createProviderCredentialStore(openRouterSecrets, {
-          legacySecretKeys: { [profileIdFor("openrouter")]: OPENROUTER_API_KEY_SECRET_KEY },
+          legacySecretKeys: { [profileIdFor("openrouter")]: SECRET_KEYS.openRouterApiKey.legacy },
         })
       : undefined;
   }
@@ -147,6 +148,24 @@ export class MessageRouter {
           return { success: true, sessions: this.runtimeManager.listSessions() };
         }
         return { success: true, sessions: this.agentManager.listSessions() };
+      }
+      case "OPEN_HISTORY":
+        // Handled by the webview host (it owns the editor panel); kept in the
+        // exhaustive switch so a direct call is a documented no-op.
+        return { success: true };
+      case "OPEN_AGENT_EDITOR":
+        // Handled by the webview host (it owns the editor panel); kept in the
+        // exhaustive switch so a direct call is a documented no-op.
+        return { success: true };
+      case "DELETE_SESSION": {
+        // History Delete: cancel any run, drop the session and erase its
+        // transcript so it cannot reappear in the list after a restart.
+        if (this.usesManagedRuntime() && this.runtimeManager) {
+          await this.runtimeManager.deleteSession(typed.sessionId);
+        } else {
+          await this.agentManager.deleteSession(typed.sessionId);
+        }
+        return { success: true };
       }
       case "GET_TRANSCRIPT": {
         if (this.usesManagedRuntime() && this.runtimeManager) {
@@ -768,6 +787,7 @@ export class MessageRouter {
         }
         return message as WebviewMessage;
       case "GET_EXTENSION_INFO":
+      case "OPEN_AGENT_EDITOR":
         return message as WebviewMessage;
       case "CONNECT_CURSOR":
         if (typed.apiKey !== undefined && typeof typed.apiKey !== "string") {
