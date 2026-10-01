@@ -1,7 +1,7 @@
 import { CursorClient } from "./cursorClient";
 import { CursorAuthError } from "./cursorAuthError";
 import { SecretStorage } from "./secretStorage";
-import { API_KEY_SECRET_KEY } from "../shared/constants";
+import { SECRET_KEYS, deleteSecret, readSecret } from "../shared/storageKeys";
 import type { AuthStatusMessage } from "../webview/types";
 
 export interface CursorConnection {
@@ -19,7 +19,7 @@ export class CursorConnectionService implements CursorConnection {
   ) {}
 
   async restore(): Promise<AuthStatusMessage> {
-    const stored = await this.secretStorage.get(API_KEY_SECRET_KEY);
+    const stored = await readSecret(this.secretStorage, SECRET_KEYS.cursorApiKey);
     if (!stored) {
       this.cursorClient.setApiKey(undefined);
       return this.statusMessage("disconnected", false);
@@ -31,7 +31,7 @@ export class CursorConnectionService implements CursorConnection {
 
   async connect(apiKey?: string): Promise<AuthStatusMessage> {
     const incoming = apiKey?.trim();
-    const stored = await this.secretStorage.get(API_KEY_SECRET_KEY);
+    const stored = await readSecret(this.secretStorage, SECRET_KEYS.cursorApiKey);
     const key = incoming && incoming.length > 0 ? incoming : stored;
 
     if (!key) {
@@ -44,13 +44,13 @@ export class CursorConnectionService implements CursorConnection {
     try {
       const message = await this.cursorClient.validateConnection(this.getWorkspacePath());
       if (incoming && incoming.length > 0) {
-        await this.secretStorage.store(API_KEY_SECRET_KEY, incoming);
+        await this.secretStorage.store(SECRET_KEYS.cursorApiKey.current, incoming);
       }
       return this.statusMessage("connected", true, undefined, message);
     } catch (error) {
       this.cursorClient.setApiKey(undefined);
       if (incoming && incoming.length > 0) {
-        await this.secretStorage.delete(API_KEY_SECRET_KEY);
+        await deleteSecret(this.secretStorage, SECRET_KEYS.cursorApiKey);
       }
       return this.statusMessage("error", Boolean(stored) && !incoming, this.toUserError(error));
     }
@@ -58,12 +58,12 @@ export class CursorConnectionService implements CursorConnection {
 
   async disconnect(): Promise<AuthStatusMessage> {
     this.cursorClient.setApiKey(undefined);
-    await this.secretStorage.delete(API_KEY_SECRET_KEY);
+    await deleteSecret(this.secretStorage, SECRET_KEYS.cursorApiKey);
     return this.statusMessage("disconnected", false);
   }
 
   async getStatus(): Promise<AuthStatusMessage> {
-    const hasKey = Boolean(await this.secretStorage.get(API_KEY_SECRET_KEY));
+    const hasKey = (await readSecret(this.secretStorage, SECRET_KEYS.cursorApiKey)) !== undefined;
     if (this.cursorClient.hasApiKey()) {
       return this.statusMessage("connected", hasKey);
     }

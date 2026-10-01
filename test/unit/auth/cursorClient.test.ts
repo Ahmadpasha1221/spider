@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { configureCursorSdk } from "@cursor/sdk";
 import { CursorClient } from "../../../src/auth/cursorClient";
 import { CursorAuthError } from "../../../src/auth/cursorAuthError";
 import { Agent, Run } from "@cursor/sdk";
@@ -129,5 +130,22 @@ describe("CursorClient", () => {
 
     const client = new CursorClient("bad");
     await expect(client.validateConnection("/workspace")).rejects.toBeInstanceOf(CursorAuthError);
+  });
+
+  it("does not configure the SDK at construction (activation must not depend on Cursor)", () => {
+    new CursorClient(undefined);
+
+    expect(configureCursorSdk).not.toHaveBeenCalled();
+  });
+
+  it("configures the SDK exactly once on first use", async () => {
+    vi.mocked(Agent.list).mockResolvedValue({ items: [] });
+
+    const client = new CursorClient(undefined);
+    await client.listAgents();
+    await client.listAgents();
+
+    expect(configureCursorSdk).toHaveBeenCalledTimes(1);
+    expect(configureCursorSdk).toHaveBeenCalledWith({});
   });
 });

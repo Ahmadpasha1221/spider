@@ -32,7 +32,7 @@ function makeStore(initial: Record<string, string> = {}) {
 
 describe("providerCredentials", () => {
   it("namespaces the secret key by profile id", () => {
-    expect(providerSecretKey("openrouter-default")).toBe("codeviaCursor.provider.openrouter-default.apiKey");
+    expect(providerSecretKey("openrouter-default")).toBe("spider.provider.openrouter-default.apiKey");
     expect(providerSecretKey("ollama-default")).not.toBe(providerSecretKey("openrouter-default"));
   });
 
@@ -45,8 +45,8 @@ describe("providerCredentials", () => {
     expect(await credentials.get("ollama-http-127-0-0-1-11434")).toBe("local-token");
     expect(await credentials.get("other-profile")).toBeUndefined();
     expect(Object.keys(values).sort()).toEqual([
-      "codeviaCursor.provider.ollama-http-127-0-0-1-11434.apiKey",
-      "codeviaCursor.provider.openrouter-default.apiKey",
+      "spider.provider.ollama-http-127-0-0-1-11434.apiKey",
+      "spider.provider.openrouter-default.apiKey",
     ]);
   });
 
@@ -89,5 +89,26 @@ describe("providerCredentials", () => {
   it("treats empty stored values as absent", async () => {
     const { credentials } = makeStore({ [providerSecretKey(OPENROUTER_PROFILE)]: "" });
     expect(await credentials.get(OPENROUTER_PROFILE)).toBeUndefined();
+  });
+
+  it("falls back to the pre-rename provider slot for the same profile", async () => {
+    const preRenameKey = "codeviaCursor.provider.openrouter-default.apiKey";
+    const { credentials } = makeStore({ [preRenameKey]: "sk-pre-rename" });
+
+    expect(await credentials.get(OPENROUTER_PROFILE)).toBe("sk-pre-rename");
+
+    await credentials.store(OPENROUTER_PROFILE, "sk-new");
+
+    expect(await credentials.get(OPENROUTER_PROFILE)).toBe("sk-new");
+  });
+
+  it("clears the pre-rename provider slot on delete", async () => {
+    const preRenameKey = "codeviaCursor.provider.openrouter-default.apiKey";
+    const { credentials, values, storage } = makeStore({ [preRenameKey]: "sk-pre-rename" });
+
+    await credentials.delete(OPENROUTER_PROFILE);
+
+    expect(values).toEqual({});
+    expect(storage.delete).toHaveBeenCalledWith(preRenameKey);
   });
 });
