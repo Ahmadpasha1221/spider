@@ -4,42 +4,77 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
   <meta http-equiv="Content-Security-Policy"
     content="default-src 'none'; style-src {{cspSource}}; script-src 'nonce-{{nonce}}'; img-src {{cspSource}} data:;">
+
   <title>Spider</title>
   <link rel="stylesheet" href="{{styleUri}}">
 </head>
 
 <body>
   <div id="app">
+
     <header class="app-header">
-      <div class="brand">Spider</div>
-      <div id="runtime-pill" class="runtime-pill">Cursor</div>
-      <button id="settings-btn" class="icon-btn" type="button" aria-label="Open Spider settings"
-        title="Settings">Settings</button>
+      <button id="brand-btn" class="brand" type="button" aria-label="Open Spider agent editor" title="Open Spider agent">
+        <img class="brand-logo" src="{{logoUri}}" alt="Spider logo">
+        <span class="brand-name">Spider</span>
+      </button>
+
+      <div id="runtime-pill" class="runtime-pill">
+        Cursor
+      </div>
+
+      <div class="header-actions">
+
+        <button id="history-btn" class="icon-btn" type="button" aria-label="Open conversation history" title="History">
+          History
+        </button>
+
+        <button id="new-session-btn" class="icon-btn icon-btn-plus" type="button" aria-label="Start a new conversation"
+          title="New conversation">
+          +
+        </button>
+
+        <button id="settings-btn" class="icon-btn" type="button" aria-label="Open Spider settings" title="Settings">
+          Settings
+        </button>
+
+      </div>
     </header>
 
     <main id="chat-view" class="view">
       <div id="setup-banner" class="setup-banner" hidden></div>
-      <div id="session-bar" class="session-bar"></div>
+
       <div id="message-list" class="message-list"></div>
+
       <div id="composer" class="composer"></div>
     </main>
 
     <section id="settings-view" class="view settings-view" hidden>
+
       <div class="settings-heading">
         <div>
           <h1>Settings</h1>
-          <p class="hint">Choose how Spider runs your coding agent.</p>
+          <p class="hint">
+            Choose how Spider runs your coding agent.
+          </p>
         </div>
-        <button id="settings-back" class="btn btn-ghost" type="button">Back to chat</button>
+
+        <button id="settings-back" class="btn btn-ghost" type="button">
+          Back to chat
+        </button>
       </div>
+
       <div id="provider-settings"></div>
+
       <p id="auth-feedback" class="feedback" hidden></p>
+
     </section>
-  </div>
-  <script nonce="{{nonce}}" src="{{scriptUri}}" data-spider-logo="{{logoUri}}"></script>
+
+  </div>  <script nonce="{{nonce}}" src="{{scriptUri}}" data-spider-logo="{{logoUri}}"></script>
   <meta name="spider-logo" content="{{logoUri}}">
+  <meta name="spider-show-settings" content="{{showSettings}}">
 </body>
 
 </html>

@@ -37,22 +37,41 @@ input:focus, select:focus, textarea:focus {
 #app { display: flex; flex-direction: column; height: 100%; min-width: 0; }
 
 .app-header { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); min-height: 42px; }
-.brand { font-weight: 600; letter-spacing: .02em; }
+/* Clickable Spider brand: the logo opens (or focuses) the Spider
+   editor tab from any surface — sidebar or editor. */
+.brand { display: inline-flex; align-items: center; gap: 7px; background: transparent; border: 0; color: var(--fg); padding: 2px 5px; cursor: pointer; font: inherit; font-weight: 600; letter-spacing: .02em; flex-shrink: 0; }
+.brand:hover { color: var(--accent-soft); background: var(--user-bg); }
+.brand:active { color: var(--accent); }
+.brand-logo { width: 18px; height: 18px; object-fit: contain; flex-shrink: 0; }
+.brand-name { user-select: none; }
 .runtime-pill { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .icon-btn { border: 0; background: transparent; color: var(--muted); padding: 4px 7px; cursor: pointer; }
 .icon-btn:hover { color: var(--accent-soft); background: var(--user-bg); }
 .icon-btn:active { color: var(--accent); }
+.icon-btn:disabled { opacity: .45; cursor: default; }
+/* Header actions hug the top-right corner; the runtime pill flexes to push
+   them there, so no absolute positioning is needed. */
+.header-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.icon-btn-plus { font-size: 16px; font-weight: 600; line-height: 1; padding: 3px 9px; }
 
 .view { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 10px; gap: 8px; }
 .view[hidden] { display: none; }
+
+/* Editor-tab layout: keep the conversation and settings in a centered
+   reading column when the surface is wide (the Codex / Cline / Kilo
+   editor-view look). The narrow sidebar is unaffected because it is
+   smaller than the column, so the rule only changes wide surfaces. */
+#chat-view > *,
+.settings-view > * {
+  margin-inline: auto;
+  max-width: 760px;
+  width: 100%;
+}
 
 .setup-banner:not([hidden]) { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); padding: 12px; background: var(--card-bg); }
 .setup-banner span { color: var(--muted); line-height: 1.4; }
 .setup-banner .btn { align-self: flex-start; margin-top: 3px; }
 
-/* Conversation bar: New-conversation only (history navigation lives nowhere in
-   the chat UI; sessions are still persisted by the host). */
-.session-bar { display: flex; align-items: center; gap: 6px; min-width: 0; }
 
 .message-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px; }
 .empty-chat { height: 100%; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; text-align: center; color: var(--muted); }
@@ -160,13 +179,16 @@ input:focus, select:focus, textarea:focus {
 .composer-input { position: relative; display: block; }
 .composer-input textarea {
   width: 100%; min-height: 76px; max-height: 1000px; resize: vertical;
-  /* Bottom padding reserves the action row so text never runs under it. */
-  padding: 5px 5px 34px; border: 1px solid transparent; outline: none;
+  /* Top padding reserves the action row (Send sits in the top-right corner)
+     so text never runs under the buttons. */
+  padding: 34px 5px 5px; border: 1px solid transparent; outline: none;
   background: transparent; color: var(--input-fg);
 }
 .composer-input textarea:focus { border-color: transparent; box-shadow: none; }
 .composer-actions {
-  position: absolute; right: 4px; bottom: 4px;
+  /* Anchored to the TOP-right corner of the input area: Send (and Cancel /
+     Try Again) stay beside the first line of text, not below the textarea. */
+  position: absolute; right: 4px; top: 4px;
   display: flex; align-items: center; justify-content: flex-end; gap: 6px;
   flex-wrap: nowrap; max-width: calc(100% - 8px);
 }
@@ -174,7 +196,7 @@ input:focus, select:focus, textarea:focus {
 /* Narrow VS Code sidebars: let the action row wrap onto a second line and
    reserve the matching vertical space in the textarea. */
 @media (max-width: 340px) {
-  .composer-input textarea { padding-bottom: 62px; }
+  .composer-input textarea { padding-top: 62px; }
   .composer-actions { flex-wrap: wrap; }
 }
 
@@ -320,3 +342,56 @@ h2 { font-size: 13px; margin-bottom: 4px; }
 .question-input { width: 100%; padding: 7px 8px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--border); }
 .question-actions { display: flex; gap: 6px; justify-content: flex-end; }
 .question-overlay[hidden] { display: none; }
+
+/* History editor tab (gui/history.html). Shares the theme variables above so
+   it matches the sidebar without duplicating a stylesheet. */
+.history-body { background: var(--vscode-editor-background, var(--bg)); }
+#history-app { max-width: 1100px; margin: 0 auto; padding: 20px 18px 32px; display: flex; flex-direction: column; gap: 12px; }
+.history-header h1 { margin: 0 0 4px; font-size: 17px; font-weight: 600; }
+.history-header .hint { margin: 0; color: var(--muted); }
+
+/* Master/detail: conversation list left, read-only transcript right. */
+.history-layout { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 14px; align-items: start; }
+.history-list-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.history-list { display: flex; flex-direction: column; gap: 6px; }
+.history-row {
+  display: flex; align-items: stretch; gap: 2px;
+  background: var(--card-bg); border: 1px solid var(--border);
+}
+.history-row:hover { border-color: var(--accent); }
+.history-row.is-active { border-left: 3px solid var(--accent); }
+.history-row.is-previewing { background: var(--user-bg); }
+.history-row-main {
+  display: grid; grid-template-columns: 1fr auto; grid-template-areas: "title status" "meta status";
+  gap: 2px 10px; flex: 1; min-width: 0; text-align: left; padding: 9px 11px; cursor: pointer;
+  background: transparent; color: var(--fg); border: 0;
+}
+.history-row-title { grid-area: title; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-row-meta { grid-area: meta; font-size: 11px; color: var(--muted); }
+.history-row-status { grid-area: status; align-self: center; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.history-row-status[data-status="RUNNING"], .history-row-status[data-status="READY"], .history-row-status[data-status="STARTING"] { color: var(--vscode-testing-iconPassed, #73c991); }
+.history-row-status[data-status="FAILED"], .history-row-status[data-status="CANCELLED"] { color: var(--error); }
+.history-row-delete {
+  flex-shrink: 0; align-self: stretch; padding: 0 10px; cursor: pointer;
+  background: transparent; color: var(--muted); border: 0; border-left: 1px solid var(--border); font-size: 11px;
+}
+.history-row-delete:hover { color: var(--accent-contrast); background: var(--error); }
+
+.history-preview { position: sticky; top: 0; min-width: 0; max-height: calc(100vh - 130px); overflow: auto;
+  padding: 10px 12px; background: var(--card-bg); border: 1px solid var(--border); }
+.history-preview-body { display: flex; flex-direction: column; gap: 8px; }
+.preview-entry { display: flex; flex-direction: column; gap: 2px; padding-left: 8px; border-left: 2px solid var(--border); }
+.preview-entry-label { font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.preview-entry-text { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+.preview-user { border-left-color: var(--accent-soft); }
+.preview-assistant { border-left-color: var(--accent); }
+.preview-error { border-left-color: var(--error); }
+.preview-thinking .preview-entry-text { color: var(--muted); font-style: italic; }
+
+.history-empty { color: var(--muted); }
+.history-empty[hidden] { display: none; }
+
+@media (max-width: 720px) {
+  .history-layout { grid-template-columns: 1fr; }
+  .history-preview { position: static; max-height: none; }
+}
