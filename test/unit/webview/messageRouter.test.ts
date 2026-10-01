@@ -191,4 +191,17 @@ describe("MessageRouter", () => {
     expect(runtimeManager.resolvePermission).toHaveBeenCalledWith("req-1", "DENY");
     expect(runtimeManager.retryTask).toHaveBeenCalledWith("session-1");
   });
+
+  it("accepts OPEN_AGENT_EDITOR as a documented no-op (the host owns the editor tab)", async () => {
+    const agentManager = {
+      startTask: vi.fn(),
+      createSession: vi.fn(),
+      cancelTask: vi.fn(),
+    } as unknown as AgentManager;
+
+    const router = new MessageRouter(agentManager);
+    const result = await router.handleMessage({ type: "OPEN_AGENT_EDITOR" });
+
+    expect(result).toEqual({ success: true });
+  });
 });

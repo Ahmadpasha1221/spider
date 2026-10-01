@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
-import { COMMANDS, EXTENSION_NAME, OPENROUTER_API_KEY_SECRET_KEY, WEB_SEARCH_API_KEY_SECRET_KEY } from "./shared/constants";
+import { CHAT_PERMISSION_COMMANDS, COMMANDS, EXTENSION_NAME } from "./shared/constants";
+import { SECRET_KEYS, STORAGE_KEYS, readState } from "./shared/storageKeys";
+import { registerSpiderChatParticipant } from "./chat/chatParticipant";
 import { Logger } from "./utils/logger";
 import { CursorAuthProvider } from "./auth/cursorAuthProvider";
 import { VSCodeSecretStorageAdapter } from "./auth/secretStorage";
@@ -11,7 +13,9 @@ import { SessionStore } from "./session/sessionStore";
 import { ProviderConfigStore, profileIdFor } from "./session/providerConfigStore";
 import { TranscriptStore } from "./session/transcriptStore";
 import { MessageRouter } from "./webview/messageRouter";
+import { AgentWebviewHost } from "./webview/agentWebviewHost";
 import { AgentViewProvider } from "./webview/agentViewProvider";
+import { AgentEditorPanel } from "./webview/agentEditorPanel";
 import { PermissionManager } from "./permissions/permissionManager";
 import { createDefaultPermissionPolicy } from "./permissions/permissionPolicy";
 import { RuntimeManager } from "./runtime/runtimeManager";
@@ -40,7 +44,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.authentication.registerAuthenticationProvider(
-      "codeviaCursor",
+      "spider",
       "Spider",
       authProvider,
       { supportsMultipleAccounts: false },
@@ -53,12 +57,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     {
       load: () => {
-        const raw = context.workspaceState.get<unknown>("codeviaCursor.permissionRules");
+        const raw = readState<unknown>(context.workspaceState, STORAGE_KEYS.permissionRules);
         return Array.isArray(raw) ? (raw as ReadonlyArray<{ category: string; rule: string }>) : [];
       },
       save: (snapshot) => {
         void context.workspaceState.update(
-          "codeviaCursor.permissionRules",
+          STORAGE_KEYS.permissionRules.current,
           Object.entries(snapshot.rules).map(([category, rule]) => ({ category, rule })),
         );
       },
@@ -70,7 +74,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // The legacy single OpenRouter key is the migration source for the default
   // OpenRouter profile.
   const providerCredentials = createProviderCredentialStore(secretStorage, {
-    legacySecretKeys: { [profileIdFor("openrouter")]: OPENROUTER_API_KEY_SECRET_KEY },
+    legacySecretKeys: { [profileIdFor("openrouter")]: SECRET_KEYS.openRouterApiKey.legacy },
   });
 
   const sessionStore = new SessionStore(context.workspaceState);
@@ -85,7 +89,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // no key is read (or held) until the tool is actually used.
   const webSearch = createStoredWebSearchProvider({
     secretStorage,
-    secretKey: WEB_SEARCH_API_KEY_SECRET_KEY,
+    secretKey: SECRET_KEYS.webSearchApiKey.current,
+    legacySecretKey: SECRET_KEYS.webSearchApiKey.legacy,
   });
   const toolExecutor = new WorkspaceToolExecutor({
     diagnostics: createVSCodeDiagnosticsSource(),
@@ -115,7 +120,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     secretStorage,
     { permissionManager },
   );
-  const agentViewProvider = new AgentViewProvider(
+  // One host bridges the runtime to every Spider surface: the
+  // sidebar Agent view and the editor-area Spider tab.
+  const agentWebviewHost = new AgentWebviewHost(
     context.extensionUri,
     agentManager,
     messageRouter,
@@ -123,11 +130,89 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     runtimeManager,
     permissionManager,
   );
+  const agentViewProvider = new AgentViewProvider(agentWebviewHost);
 
+  // --- Register everything VS Code can invoke BEFORE any async work. If a
+  // provider fails to initialize later, commands and the Agent view must
+  // still exist (a failed activation is what surfaced as
+  // "command 'spider.openAgent' not found" in packaged installs).
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("codeviaCursor.agent", agentViewProvider, {
+    vscode.window.registerWebviewViewProvider("spider.agent", agentViewProvider, {
       webviewOptions: { retainContextWhenHidden: true },
     }),
+  );
+
+  // Spider's primary surface is an editor-area tab (the Codex /
+  // Cline / Kilo style editor view). The sidebar stays available
+  // from the activity bar; both show the same conversation.
+  const openAgentCommand = vscode.commands.registerCommand(COMMANDS.openAgent, async () => {
+    logger.info("Open agent command invoked", { operation: "openAgent" });
+    AgentEditorPanel.createOrShow(context.extensionUri, agentWebviewHost);
+  });
+
+  // Explicit editor-tab command (palette + clickable Spider logo).
+  const openAgentEditorCommand = vscode.commands.registerCommand(COMMANDS.openAgentEditor, async () => {
+    logger.info("Open agent editor command invoked", { operation: "openAgentEditor" });
+    AgentEditorPanel.createOrShow(context.extensionUri, agentWebviewHost);
+  });
+
+  const openSettingsCommand = vscode.commands.registerCommand(COMMANDS.openSettings, async () => {
+    logger.info("Open settings command invoked", { operation: "openSettings" });
+    AgentEditorPanel.createOrShow(context.extensionUri, agentWebviewHost);
+    agentWebviewHost.showSettings();
+  });
+
+  const openHistoryCommand = vscode.commands.registerCommand(COMMANDS.openHistory, async () => {
+    logger.info("Open history command invoked", { operation: "openHistory" });
+    agentWebviewHost.openHistory();
+  });
+
+  context.subscriptions.push(
+    openAgentCommand,
+    openAgentEditorCommand,
+    openSettingsCommand,
+    openHistoryCommand,
+  );
+
+  // Clickable Spider logo: one click opens the Spider editor tab.
+  const spiderStatusItem = vscode.window.createStatusBarItem(
+    "spider.agent",
+    vscode.StatusBarAlignment.Left,
+    50,
+  );
+  spiderStatusItem.name = "Spider Agent";
+  spiderStatusItem.text = "🕷️ Spider";
+  spiderStatusItem.tooltip = "Open the Spider agent in an editor tab";
+  spiderStatusItem.command = COMMANDS.openAgentEditor;
+  spiderStatusItem.show();
+  context.subscriptions.push(spiderStatusItem);
+
+  // VS Code Chat (@spider): same RuntimeManager as the sidebar, dedicated
+  // session per chat lifetime. Registered at activation so
+  // onChatParticipant:spider.spider can resolve it.
+  context.subscriptions.push(
+    registerSpiderChatParticipant({
+      extensionUri: context.extensionUri,
+      runtimeManager,
+      permissionManager,
+      defaultWorkspacePath: getWorkspacePath(),
+    }),
+  );
+
+  // Allow/Deny buttons the chat participant renders for destructive tools.
+  const resolveChatPermission = (decision: "ALLOW" | "DENY") => (requestId: unknown) => {
+    if (typeof requestId !== "string" || requestId.length === 0) {
+      return;
+    }
+    permissionManager.resolveDecision({
+      requestId,
+      decision,
+      confirmation: decision === "ALLOW",
+    });
+  };
+  context.subscriptions.push(
+    vscode.commands.registerCommand(CHAT_PERMISSION_COMMANDS.allow, resolveChatPermission("ALLOW")),
+    vscode.commands.registerCommand(CHAT_PERMISSION_COMMANDS.deny, resolveChatPermission("DENY")),
   );
 
   // Shield toggles flow through the same event bridge as runtime events so
@@ -142,39 +227,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(permissionManager, agentManager, runtimeManager, diffView, agentViewProvider);
 
-  await agentManager.restoreSessions();
-  await runtimeManager.restoreSessions();
+  // --- Optional heavyweight restoration runs after registration and must
+  // never break activation: a provider that cannot initialize only degrades
+  // that provider — the UI and all commands stay available.
+  try {
+    await agentManager.restoreSessions();
+    await runtimeManager.restoreSessions();
 
-  // Hydrate the previously selected provider profile so the user is not asked
-  // to configure the provider again. Non-secret configuration is restored from
-  // the profile store; the credential is resolved from SecretStorage by profile
-  // id — the host owns credentials, the webview only ever sees sanitized state.
-  const restoredProvider = await runtimeManager.restoreProviderConfig();
-  if (restoredProvider && !restoredProvider.applied) {
-    const { config } = restoredProvider;
-    const credential = await providerCredentials.get(config.profileId ?? profileIdFor(config.provider));
-    if (credential) {
-      await runtimeManager.completeRestore(config, credential);
-      if (runtimeManager.listSessions().length === 0) {
-        runtimeManager.createSession(getWorkspacePath());
+    // Hydrate the previously selected provider profile so the user is not asked
+    // to configure the provider again. Non-secret configuration is restored from
+    // the profile store; the credential is resolved from SecretStorage by profile
+    // id — the host owns credentials, the webview only ever sees sanitized state.
+    const restoredProvider = await runtimeManager.restoreProviderConfig();
+    if (restoredProvider && !restoredProvider.applied) {
+      const { config } = restoredProvider;
+      const credential = await providerCredentials.get(config.profileId ?? profileIdFor(config.provider));
+      if (credential) {
+        await runtimeManager.completeRestore(config, credential);
+        if (runtimeManager.listSessions().length === 0) {
+          runtimeManager.createSession(getWorkspacePath());
+        }
+      } else {
+        logger.info("Saved provider profile has no stored credential; skipping restore", { operation: "activate" });
       }
-    } else {
-      logger.info("Saved provider profile has no stored credential; skipping restore", { operation: "activate" });
     }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    logger.error(`Optional startup restoration failed; Spider UI remains available: ${detail}`, {
+      operation: "activate",
+    });
   }
-
-  const openAgentCommand = vscode.commands.registerCommand(COMMANDS.openAgent, async () => {
-    logger.info("Open agent command invoked", { operation: "openAgent" });
-    await vscode.commands.executeCommand("workbench.view.extension.codeviaCursor.agent");
-  });
-
-  const openSettingsCommand = vscode.commands.registerCommand(COMMANDS.openSettings, async () => {
-    logger.info("Open settings command invoked", { operation: "openSettings" });
-    await vscode.commands.executeCommand("workbench.view.extension.codeviaCursor.agent");
-    agentViewProvider.showSettings();
-  });
-
-  context.subscriptions.push(openAgentCommand, openSettingsCommand);
 
   logger.info("Extension activated", { operation: "activate" });
 }

@@ -8,9 +8,9 @@ suite("Extension Test Suite", () => {
 
   test("activates and registers commands", async () => {
     const commands = await vscode.commands.getCommands(true);
-    assert.ok(commands.includes("codeviaCursor.openAgent"), "openAgent command should be registered");
-    assert.ok(commands.includes("codeviaCursor.openSettings"), "openSettings command should be registered");
+    assert.ok(commands.includes("spider.openAgent"), "openAgent command should be registered");
+    assert.ok(commands.includes("spider.openSettings"), "openSettings command should be registered");
 
-    await vscode.commands.executeCommand("codeviaCursor.openAgent");
+    await vscode.commands.executeCommand("spider.openAgent");
   });
 });

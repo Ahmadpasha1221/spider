@@ -36,7 +36,7 @@ afterEach(() => {
 
 function createStore(sessions: unknown[] = []) {
   const workspaceState = {
-    get: vi.fn((key: string) => key === "codeviaCursor.sessions" ? sessions : undefined),
+    get: vi.fn((key: string) => key === "spider.sessions" ? sessions : undefined),
     update: vi.fn().mockResolvedValue(undefined),
   };
   const store = new SessionStore(workspaceState as unknown as vscode.Memento);
@@ -230,7 +230,7 @@ describe("AgentManager", () => {
       },
     ];
     const workspaceState = {
-      get: vi.fn((key: string) => key === "codeviaCursor.sessions" ? stored : "session-1"),
+      get: vi.fn((key: string) => key === "spider.sessions" ? stored : "session-1"),
       update: vi.fn().mockResolvedValue(undefined),
     };
     const store = new SessionStore(workspaceState as unknown as vscode.Memento);
@@ -240,7 +240,7 @@ describe("AgentManager", () => {
     await manager.restoreSessions();
 
     expect(manager.activeSession?.sessionId).toBe("session-1");
-    expect(workspaceState.update).toHaveBeenCalledWith("codeviaCursor.activeSession", "session-1");
+    expect(workspaceState.update).toHaveBeenCalledWith("spider.activeSession", "session-1");
   });
 
   it("restoreSessions publishes a disconnected event for interrupted sessions", async () => {
@@ -275,7 +275,7 @@ describe("AgentManager", () => {
     manager.selectSession(session.sessionId);
     await Promise.resolve();
 
-    expect(workspaceState.update).toHaveBeenCalledWith("codeviaCursor.activeSession", session.sessionId);
+    expect(workspaceState.update).toHaveBeenCalledWith("spider.activeSession", session.sessionId);
   });
 
   it("startTask transitions through states and publishes events", async () => {
