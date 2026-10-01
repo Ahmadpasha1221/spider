@@ -1,4 +1,5 @@
 import type { SecretStorage } from "../../auth/secretStorage";
+import { readSecret } from "../../shared/storageKeys";
 
 /**
  * Web-search provider abstraction.
@@ -62,6 +63,8 @@ export interface StoredWebSearchProviderOptions {
   readonly secretStorage: SecretStorage;
   /** SecretStorage key holding the provider API key. */
   readonly secretKey: string;
+  /** Pre-rename key read as a fallback (see shared/storageKeys.ts). */
+  readonly legacySecretKey?: string;
   /** Injectable for tests and alternative hosts. */
   readonly fetchFn?: typeof fetch;
   readonly endpoint?: string;
@@ -81,7 +84,12 @@ export function createStoredWebSearchProvider(options: StoredWebSearchProviderOp
   return {
     id: options.id ?? "stored",
     async search(request) {
-      const apiKey = await options.secretStorage.get(options.secretKey);
+      const apiKey = options.legacySecretKey
+        ? await readSecret(options.secretStorage, {
+            current: options.secretKey,
+            legacy: options.legacySecretKey,
+          })
+        : await options.secretStorage.get(options.secretKey);
       if (!apiKey || apiKey.trim().length === 0) {
         throw new WebSearchProviderError("not_configured", "No web search API key is configured.");
       }
