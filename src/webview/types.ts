@@ -133,7 +133,7 @@ export type ExtensionMessage =
   | { type: "AGENT_STATE"; state: AgentState }
   | { type: "AGENT_MESSAGE"; message: string; messageId?: string }
   | { type: "AGENT_TEXT_DELTA"; sessionId: string; text: string }
-  | { type: "AGENT_USAGE"; promptTokens: number; completionTokens: number; totalTokens: number; costUsd?: number }
+  | { type: "AGENT_USAGE"; promptTokens: number; completionTokens: number; totalTokens: number; costUsd?: number; partial?: boolean }
   | { type: "FILE_CHANGE"; change: FileChangeView }
   | { type: "FILE_CHANGE_REVERTED"; change: FileChangeView }
   | { type: "AGENT_THINKING"; message: string }

@@ -1,12 +1,11 @@
-import * as path from "node:path";
 import {
   describeExecutionContext,
   resolveExecutionContext,
 } from "./executionContext";
+import { translatorFor } from "./pathTranslator";
 import {
   ExecutionContext,
   ExecutionEnvironment,
-  ExecutionContextError,
 } from "./executionTypes";
 
 /**
@@ -97,19 +96,7 @@ export class ExecutionManager {
    */
   resolveCwd(workspacePath: string, hostAbsolutePath: string): string {
     const context = this.resolve(workspacePath);
-    if (context.backend !== "wsl") {
-      return hostAbsolutePath;
-    }
-    const relative = path.win32.relative(path.win32.normalize(workspacePath), path.win32.normalize(hostAbsolutePath));
-    if (relative.length === 0 || relative === ".") {
-      return context.cwd;
-    }
-    if (relative.startsWith("..") || path.win32.isAbsolute(relative)) {
-      throw new ExecutionContextError(
-        `Path is outside the workspace execution environment: ${hostAbsolutePath}`,
-      );
-    }
-    return posixJoin(context.cwd, relative.split(/[\\/]+/).filter((segment) => segment.length > 0));
+    return translatorFor(context).toExecutionCwd(workspacePath, hostAbsolutePath, context);
   }
 
   /** Safe, secret-free summary for logs and the agent prompt. */
@@ -120,12 +107,6 @@ export class ExecutionManager {
       return undefined;
     }
   }
-}
-
-function posixJoin(root: string, segments: readonly string[]): string {
-  const base = root.endsWith("/") ? root.slice(0, -1) : root;
-  const suffix = segments.join("/");
-  return suffix.length === 0 ? base : `${base}/${suffix}`;
 }
 
 /**
@@ -176,6 +157,36 @@ export function buildCommandInvocation(
   return {
     file: posixShell,
     args: ["-c", command],
+    shell: false,
+    cwd,
+    env: context.env,
+  };
+}
+
+/**
+ * Builds the launch for an argv command (no shell interpretation at all), used
+ * by `background_command` and `run_tests`. Every entry stays its own argument,
+ * so no executable or argument is ever concatenated into a shell line.
+ */
+export function buildArgvInvocation(
+  context: ExecutionContext,
+  command: string,
+  args: readonly string[],
+  cwd: string,
+): SpawnInvocation {
+  if (context.backend === "wsl") {
+    const distroArgs = context.wslDistro ? ["-d", context.wslDistro] : [];
+    return {
+      file: "wsl.exe",
+      args: [...distroArgs, "--cd", cwd, "--", command, ...args],
+      shell: false,
+      cwd: undefined,
+      env: context.env,
+    };
+  }
+  return {
+    file: command,
+    args: [...args],
     shell: false,
     cwd,
     env: context.env,

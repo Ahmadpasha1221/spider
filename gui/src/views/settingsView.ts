@@ -281,6 +281,9 @@ function renderAboutSection(root: HTMLElement, state: AppState): void {
   if (info?.activeProvider) {
     rows.push(`Provider: ${info.activeProvider}${info.activeModelId ? ` · ${info.activeModelId}` : ""}`);
   }
+  if (info?.executionContext) {
+    rows.push(`Execution: ${info.executionContext}`);
+  }
   details.textContent = rows.join(" · ") || "An AI coding agent for VS Code.";
 
   const links = document.createElement("div");

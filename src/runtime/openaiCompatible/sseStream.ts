@@ -34,6 +34,7 @@ export async function consumeOpenAiSseStream(
   response: Response,
   signal: AbortSignal | undefined,
   onDelta: ((text: string) => void) | undefined,
+  onUsage?: (usage: { promptTokens: number; completionTokens: number; totalTokens: number }) => void,
 ): Promise<ChatCompletion> {
   if (!response.body) {
     const payload = (await response.json()) as SseChatChunk & {
@@ -76,6 +77,9 @@ export async function consumeOpenAiSseStream(
     const chunkUsage = normalizeUsage(chunk.usage);
     if (chunkUsage) {
       usage = chunkUsage;
+      // Live snapshot for the current completion (cumulative totals, not an
+      // increment). The terminal usage below is still the authoritative one.
+      onUsage?.(chunkUsage);
     }
   };
 

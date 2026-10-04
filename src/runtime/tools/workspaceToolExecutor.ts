@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { RuntimeToolCall, RuntimeToolExecutor, RuntimeToolExecutorContext } from "../runtimeTypes";
 import { runWorkspaceCommand } from "./commandRunner";
 import type { ExecutionManager } from "../execution/executionManager";
-import { ExecutionContextError } from "../execution/executionTypes";
+import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
 import { isLocalToolName, type LocalToolName } from "./toolRegistry";
 import { pathExists, resolveWorkspacePathSafe, toWorkspaceRelativePath } from "./workspacePath";
 import { readMultipleFiles, readWorkspaceTextFile } from "./filesystemTools";
@@ -60,6 +60,8 @@ export interface WorkspaceToolExecutorOptions {
    * the extension so run_command runs in the correct workspace environment.
    */
   readonly executionManager?: ExecutionManager;
+  /** Overridable command runner (tests, alternative hosts). */
+  readonly runCommand?: typeof runWorkspaceCommand;
 }
 
 export class WorkspaceToolExecutor implements RuntimeToolExecutor {
@@ -72,6 +74,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
   private readonly webSearch?: WebSearchProvider;
   private readonly language?: LanguageSource;
   private readonly executionManager?: ExecutionManager;
+  private readonly runCommandFn: typeof runWorkspaceCommand;
 
   constructor(options: WorkspaceToolExecutorOptions = {}) {
     this.diagnostics = options.diagnostics;
@@ -83,6 +86,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     this.webSearch = options.webSearch;
     this.language = options.language;
     this.executionManager = options.executionManager;
+    this.runCommandFn = options.runCommand ?? runWorkspaceCommand;
   }
 
   async execute(call: RuntimeToolCall, context: RuntimeToolExecutorContext): Promise<unknown> {
@@ -118,7 +122,13 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
           ...(context.signal ? { signal: context.signal } : {}),
         });
       case "search_files":
-        return this.searchFiles(workspacePath, requiredString(input, "query"), stringField(input, "path") ?? ".", context.signal);
+        return this.searchFiles(
+          workspacePath,
+          requiredString(input, "query"),
+          stringField(input, "path") ?? ".",
+          context.signal,
+          input.includeIgnored === true,
+        );
       case "grep_search":
         return grepSearch(input, {
           workspacePath,
@@ -261,6 +271,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       case "run_tests":
         return runTests(input, { workspacePath, ...(context.signal ? { signal: context.signal } : {}) }, {
           backgroundProcesses: this.backgroundProcesses,
+          ...(this.executionManager ? { executionManager: this.executionManager } : {}),
         });
       default:
         throw new ToolExecutionError("invalid_input", `Unknown tool: ${name}`);
@@ -289,6 +300,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     query: string,
     requested: string,
     signal?: AbortSignal,
+    includeIgnored = false,
   ): Promise<unknown> {
     const root = await resolveWorkspacePathSafe(workspacePath, requested);
     const matches: Array<{ path: string; line: number; text: string }> = [];
@@ -326,6 +338,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       // Preserved from the legacy implementation: results are always
       // workspace-relative, even when the search is narrowed to a subfolder.
       relativeTo: workspacePath,
+      includeIgnored,
     });
 
     if (walk.truncated) {
@@ -386,6 +399,31 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     return { path: requested, deleted: true };
   }
 
+  /**
+   * The ONE place the executor asks the ExecutionManager where a command runs.
+   * `WorkspaceToolExecutor` never guesses the environment; an unresolvable
+   * context becomes a structured tool error instead of a silent fallback.
+   */
+  private resolveExecution(
+    workspacePath: string,
+    hostDirectory: string,
+  ): { context?: ExecutionContext; directory: string } {
+    if (!this.executionManager) {
+      return { directory: hostDirectory };
+    }
+    try {
+      return {
+        context: this.executionManager.resolve(workspacePath),
+        directory: this.executionManager.resolveCwd(workspacePath, hostDirectory),
+      };
+    } catch (error) {
+      if (error instanceof ExecutionContextError) {
+        throw new ToolExecutionError("dependency_unavailable", error.message);
+      }
+      throw error;
+    }
+  }
+
   private async runCommand(
     workspacePath: string,
     command: string,
@@ -395,23 +433,8 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     onOutput?: (stream: "stdout" | "stderr", chunk: string) => void,
   ): Promise<unknown> {
     const hostDirectory = await resolveWorkspacePathSafe(workspacePath, cwd && cwd.length > 0 ? cwd : ".");
-    // The ExecutionManager is the only component that decides WHERE the command
-    // runs. CommandRunner never inspects the host environment itself.
-    let context;
-    let executionDirectory = hostDirectory;
-    if (this.executionManager) {
-      try {
-        context = this.executionManager.resolve(workspacePath);
-        executionDirectory = this.executionManager.resolveCwd(workspacePath, hostDirectory);
-      } catch (error) {
-        if (error instanceof ExecutionContextError) {
-          // Structured failure: never silently fall back to a different shell.
-          throw new ToolExecutionError("dependency_unavailable", error.message);
-        }
-        throw error;
-      }
-    }
-    return runWorkspaceCommand({
+    const { context, directory: executionDirectory } = this.resolveExecution(workspacePath, hostDirectory);
+    return this.runCommandFn({
       command,
       cwd: executionDirectory,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
@@ -441,9 +464,10 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     if (command.startsWith("-")) {
       throw new ToolExecutionError("invalid_input", "command must not start with '-'.");
     }
-    const cwd = await resolveWorkspacePathSafe(workspacePath, requestedCwd && requestedCwd.length > 0 ? requestedCwd : ".");
+    const hostCwd = await resolveWorkspacePathSafe(workspacePath, requestedCwd && requestedCwd.length > 0 ? requestedCwd : ".");
+    const { context, directory: executionCwd } = this.resolveExecution(workspacePath, hostCwd);
 
-    const relativeCwd = toWorkspaceRelativePath(workspacePath, cwd) || ".";
+    const relativeCwd = toWorkspaceRelativePath(workspacePath, hostCwd) || ".";
 
     if (signal?.aborted) {
       return {
@@ -459,9 +483,10 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     const started = await this.backgroundProcesses.start({
       command,
       ...(argsPopped.length ? { args: argsPopped as readonly string[] } : {}),
-      cwd,
+      cwd: executionCwd,
       ...(startupTimeoutMs !== undefined ? { startupTimeoutMs } : {}),
       ...(signal ? { signal } : {}),
+      ...(context ? { context } : {}),
     });
 
     return {

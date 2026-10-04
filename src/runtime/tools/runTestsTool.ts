@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import type { ExecutionManager } from "../execution/executionManager";
+import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
 import { pathExists, resolveWorkspacePathSafe } from "./workspacePath";
 import { ToolExecutionError } from "./toolError";
 import {
@@ -40,6 +42,10 @@ export interface RunTestsResult {
   readonly args: readonly string[];
   readonly command: string;
   readonly cwd: string;
+  /** Workspace-relative test path requested, if any. */
+  readonly path?: string;
+  /** Test-name filter requested, if any. */
+  readonly filter?: string;
   readonly passed: boolean;
   readonly exitCode: number | null;
   readonly durationMs: number;
@@ -58,6 +64,8 @@ export interface RunTestsToolContext {
 
 export interface RunTestsToolDeps {
   readonly backgroundProcesses: BackgroundProcessManager;
+  /** Resolves the real execution environment (WSL/remote) for the runner. */
+  readonly executionManager?: ExecutionManager;
 }
 
 export async function runTests(
@@ -67,18 +75,34 @@ export async function runTests(
 ): Promise<RunTestsResult> {
   const startedAt = Date.now();
   const runner = parseRunner(input.runner);
-  const args = parseArgs(input.args);
+  const rawArgs = parseArgs(input.args);
+  const testPath = await parseTestPath(input.path, context.workspacePath);
+  const filter = parseFilter(input.filter);
+  // Targeted runs (path/filter) and raw argv are mutually exclusive: mixing
+  // them would let flag ordering silently change what the runner selects.
+  if (rawArgs.length > 0 && (testPath !== undefined || filter !== undefined)) {
+    throw new ToolExecutionError(
+      "invalid_input",
+      "Pass either args or path/filter, not both: path and filter are translated into runner argv for you.",
+    );
+  }
+  const args = buildTargetArgs(runner, rawArgs, testPath, filter);
   const cwd = await parseCwd(input.cwd, context.workspacePath);
   const timeoutMs = parseTimeout(input.timeoutMs);
   if (context.signal?.aborted) {
     throw new ToolExecutionError("cancelled", "Tool execution was cancelled.");
   }
 
+  // Resolve WHERE the runner executes (local / WSL / remote) through the single
+  // authoritative manager; the runner then starts in that environment.
+  const execution = resolveExecution(deps.executionManager, context.workspacePath, cwd);
+
   const started = await deps.backgroundProcesses.start({
     command: runner,
     args,
-    cwd,
+    cwd: execution.directory,
     ...(context.signal ? { signal: context.signal } : {}),
+    ...(execution.context ? { context: execution.context } : {}),
   });
   const processId = started.processId;
 
@@ -110,6 +134,8 @@ export async function runTests(
     args,
     command: [runner, ...args].join(" "),
     cwd: toWorkspaceRelativeCwd(context.workspacePath, cwd),
+    ...(testPath !== undefined ? { path: toWorkspaceRelativeCwd(context.workspacePath, testPath) } : {}),
+    ...(filter !== undefined ? { filter } : {}),
     passed: !timedOut && !cancelled && exitCode === 0,
     exitCode,
     durationMs: Date.now() - startedAt,
@@ -181,6 +207,118 @@ export async function parseCwd(value: unknown, workspacePath: string): Promise<s
   return resolved;
 }
 
+/**
+ * Targeted test path: a workspace-relative file or directory that must exist.
+ * Returned absolute (execution-side); echoed workspace-relative in the result.
+ */
+export async function parseTestPath(value: unknown, workspacePath: string): Promise<string | undefined> {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new ToolExecutionError("invalid_input", "path must be a workspace-relative file or directory.");
+  }
+  if (value.trim().startsWith("-")) {
+    throw new ToolExecutionError("invalid_input", "path must not start with '-'.");
+  }
+  const resolved = await resolveWorkspacePathSafe(workspacePath, value);
+  if (!(await pathExists(resolved))) {
+    throw new ToolExecutionError("not_found", `Test path does not exist: ${value}`);
+  }
+  return resolved;
+}
+
+/** Test-name filter: a runner-native pattern (`-k`, `-t`, `-run`, …). */
+export function parseFilter(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ToolExecutionError("invalid_input", "filter must be a non-empty string.");
+  }
+  const filter = value.trim();
+  if (filter.length > 200) {
+    throw new ToolExecutionError("invalid_input", "filter must be at most 200 characters.");
+  }
+  return filter;
+}
+
+/**
+ * Translates a targeted request into runner-native argv (still argv-only, no
+ * shell). Runners that cannot express a path or filter combination fail with
+ * guidance instead of a silently wrong selection.
+ */
+export function buildTargetArgs(runner: string, rawArgs: readonly string[], testPath: string | undefined, filter: string | undefined): string[] {
+  const name = runner.toLowerCase();
+  if (testPath === undefined && filter === undefined) {
+    return [...rawArgs];
+  }
+  const forbidArgs = (): void => {
+    if (rawArgs.length > 0) {
+      throw new ToolExecutionError(
+        "invalid_input",
+        "Pass either args or path/filter, not both: path and filter are translated into runner argv for you.",
+      );
+    }
+  };
+  // (The caller already enforces this; the per-runner check keeps the
+  // function safe when used directly.)
+  forbidArgs();
+  switch (name) {
+    case "pytest": {
+      const targeted: string[] = [];
+      if (testPath !== undefined) {
+        targeted.push(testPath);
+      }
+      if (filter !== undefined) {
+        targeted.push("-k", filter);
+      }
+      return targeted;
+    }
+    case "python":
+    case "python3": {
+      if (filter !== undefined) {
+        throw new ToolExecutionError(
+          "invalid_input",
+          `Runner ${runner} cannot filter by test name; use runner "pytest" with filter instead.`,
+        );
+      }
+      return testPath !== undefined ? [testPath] : [];
+    }
+    case "pnpm":
+    case "npm":
+    case "yarn": {
+      const targeted = ["test", "--"];
+      if (testPath !== undefined) {
+        targeted.push(testPath);
+      }
+      if (filter !== undefined) {
+        targeted.push("-t", filter);
+      }
+      return targeted;
+    }
+    case "cargo": {
+      if (testPath !== undefined) {
+        throw new ToolExecutionError(
+          "invalid_input",
+          'Runner "cargo" selects test targets by name, not by path; pass the test name as filter instead.',
+        );
+      }
+      return filter !== undefined ? ["test", filter] : ["test"];
+    }
+    case "go": {
+      const targeted = ["test"];
+      if (filter !== undefined) {
+        targeted.push("-run", filter);
+      }
+      targeted.push(testPath ?? "./...");
+      return targeted;
+    }
+    default:
+      throw new ToolExecutionError("invalid_input", `Unsupported test runner: ${runner}.`);
+  }
+}
+
 export function parseTimeout(value: unknown): number {
   if (value === undefined || value === null || value === "") {
     return TEST_RUN_LIMITS.defaultTimeoutMs;
@@ -193,6 +331,27 @@ export function parseTimeout(value: unknown): number {
     throw new ToolExecutionError("invalid_input", "timeoutMs must be at least 1000.");
   }
   return Math.min(floored, TEST_RUN_LIMITS.maxTimeoutMs);
+}
+
+function resolveExecution(
+  manager: ExecutionManager | undefined,
+  workspacePath: string,
+  hostDirectory: string,
+): { context?: ExecutionContext; directory: string } {
+  if (!manager) {
+    return { directory: hostDirectory };
+  }
+  try {
+    return {
+      context: manager.resolve(workspacePath),
+      directory: manager.resolveCwd(workspacePath, hostDirectory),
+    };
+  } catch (error) {
+    if (error instanceof ExecutionContextError) {
+      throw new ToolExecutionError("dependency_unavailable", error.message);
+    }
+    throw error;
+  }
 }
 
 function capOutput(text: string): { text: string; truncated: boolean } {

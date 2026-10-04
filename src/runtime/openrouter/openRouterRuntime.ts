@@ -3,6 +3,7 @@ import {
   ModelCapabilities,
   ModelPricing,
   OpenRouterRuntimeConfig,
+  RestoredHistoryTurn,
   RuntimeAvailability,
   RuntimeCancelRequest,
   RuntimeError,
@@ -13,6 +14,7 @@ import {
   RuntimeResumeRequest,
   RuntimeSendRequest,
   RuntimeSessionRequest,
+  RuntimeUsage,
 } from "../runtimeTypes";
 import { ChatTurn, ChatCompletion, runInferenceAgentLoop } from "../tools/inferenceAgentLoop";
 import { nativeChatTools } from "../tools/toolRegistry";
@@ -185,7 +187,7 @@ export class OpenRouterRuntime implements AgentRuntime {
     await runInferenceAgentLoop(
       request,
       this.historyFor(request.sessionId),
-      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta),
+      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta, request.usageDeltaSink),
       emit,
       { nativeTools, mode: request.mode },
     );
@@ -194,6 +196,10 @@ export class OpenRouterRuntime implements AgentRuntime {
   private historyFor(sessionId: string): ChatTurn[] {
     // The inference runtime owns histories; expose the same map by key.
     return this.inference.historyFor(sessionId);
+  }
+
+  restoreHistory(sessionId: string, turns: readonly RestoredHistoryTurn[]): boolean {
+    return this.inference.restoreHistory(sessionId, turns);
   }
 
   async cancel(request: RuntimeCancelRequest): Promise<void> {
@@ -225,6 +231,7 @@ export class OpenRouterRuntime implements AgentRuntime {
     nativeTools = true,
     mode?: AgentMode,
     onDelta?: (text: string) => void,
+    onUsage?: (usage: RuntimeUsage) => void,
   ): Promise<ChatCompletion> {
     const response = await this.request("/chat/completions", {
       method: "POST",
@@ -239,6 +246,8 @@ export class OpenRouterRuntime implements AgentRuntime {
         // Token streaming for OpenRouter too: same shared SSE consumer and
         // stream gate as the generic OpenAI-compatible base.
         stream: Boolean(onDelta),
+        // Without this OpenRouter omits the terminal usage chunk from SSE.
+        ...(onDelta ? { stream_options: { include_usage: true } } : {}),
         ...(nativeTools ? { tools: nativeChatTools(availableToolNames(mode)) } : {}),
       }),
     });
@@ -248,7 +257,7 @@ export class OpenRouterRuntime implements AgentRuntime {
     }
 
     if (onDelta) {
-      return consumeOpenAiSseStream(response, signal, onDelta);
+      return consumeOpenAiSseStream(response, signal, onDelta, onUsage);
     }
 
     const payload = (await response.json()) as {

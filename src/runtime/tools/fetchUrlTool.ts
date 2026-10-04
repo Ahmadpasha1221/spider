@@ -2,10 +2,11 @@ import { lookup } from "node:dns/promises";
 import { ToolExecutionError } from "./toolError";
 import { htmlToText } from "./htmlText";
 import {
-  assertPublicUrl,
+  assertFetchableUrl,
   parseFetchUrl,
   UrlSecurityError,
   type HostResolver,
+  type LocalNetworkPolicy,
 } from "../net/urlSecurity";
 
 /**
@@ -13,11 +14,18 @@ import {
  *
  * This is deliberately **not** web search and not a browser: no crawling, no
  * JavaScript, no page execution, no caching. Every request is bounded and the
- * target is validated against the SSRF policy (https only; loopback, private,
- * link-local and metadata addresses blocked, on the original URL *and* on every
- * redirect). Unsupported binary content is reported as metadata instead of
- * being loaded into model context.
+ * target is validated against the SSRF policy (https for the public web;
+ * http(s) loopback for local dev servers; private, link-local and metadata
+ * addresses blocked, on the original URL *and* on every redirect).
+ * Unsupported binary content is reported as metadata instead of being loaded
+ * into model context.
+ *
+ * Loopback allowance is safe to default on here because `fetch_url` already
+ * requires the `external` permission: the user approves each request, and the
+ * policy only decides which destinations are approvable. LAN/metadata ranges
+ * stay unreachable no matter what.
  */
+const LOCAL_NETWORK_POLICY: LocalNetworkPolicy = { allowLocalNetwork: true };
 export interface FetchUrlResult {
   readonly url: string;
   readonly status: number;
@@ -83,7 +91,7 @@ export async function fetchUrl(
   const maxBytes = clampPositive(input.maxBytes, FETCH_LIMITS.defaultMaxBytes, FETCH_LIMITS.maxBytesLimit);
   const timeoutMs = clampPositive(input.timeoutMs, FETCH_LIMITS.defaultTimeoutMs, FETCH_LIMITS.maxTimeoutMs, FETCH_LIMITS.minTimeoutMs);
 
-  let current = mapSecurityError(() => parseFetchUrl(input.url));
+  let current = mapSecurityError(() => parseFetchUrl(input.url, LOCAL_NETWORK_POLICY));
   let redirects = 0;
   let response: Response;
 
@@ -91,7 +99,7 @@ export async function fetchUrl(
     if (context.signal?.aborted) {
       throw new ToolExecutionError("cancelled", "Tool execution was cancelled.");
     }
-    await mapSecurityErrorAsync(() => assertPublicUrl(current, resolveHost));
+    await mapSecurityErrorAsync(() => assertFetchableUrl(current, resolveHost, LOCAL_NETWORK_POLICY));
 
     const controller = new AbortController();
     const onAbort = (): void => controller.abort();
@@ -128,7 +136,7 @@ export async function fetchUrl(
       }
       // Validate the redirect target before following it — a public URL must
       // not be able to bounce the agent onto a private address.
-      current = mapSecurityError(() => parseFetchUrl(new URL(location, current).href));
+      current = mapSecurityError(() => parseFetchUrl(new URL(location, current).href, LOCAL_NETWORK_POLICY));
       continue;
     }
     break;

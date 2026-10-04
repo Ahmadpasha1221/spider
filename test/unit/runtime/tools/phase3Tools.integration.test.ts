@@ -232,7 +232,10 @@ describe("Phase 3 registry + protocol contract", () => {
     expect(getRegisteredTool("update_todo")?.validate({})).toContain("items");
     expect(getRegisteredTool("update_todo")?.validate({ items: [] })).toBeUndefined();
     expect(getRegisteredTool("fetch_url")?.validate({})).toContain("url");
-    expect(getRegisteredTool("fetch_url")?.validate({ url: "http://example.com" })).toContain("https");
+    // http parses (loopback dev servers); the SSRF policy enforces the
+    // destination at execution time, not the registry shape check.
+    expect(getRegisteredTool("fetch_url")?.validate({ url: "http://example.com" })).toBeUndefined();
+    expect(getRegisteredTool("fetch_url")?.validate({ url: "ftp://example.com" })).toContain("https");
     expect(getRegisteredTool("fetch_url")?.validate({ url: "https://example.com" })).toBeUndefined();
   });
 

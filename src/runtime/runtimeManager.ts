@@ -29,6 +29,8 @@ import { BackgroundProcessManager } from "./tools/backgroundProcessManager";
 import type { ExecutionManager } from "./execution/executionManager";
 import { UserQuestionBroker } from "./userInteraction/userQuestionBroker";
 import { TaskPlanStore } from "./state/taskPlan";
+import { compactChatTurns } from "./tools/contextManager";
+import { restoreChatTurns } from "./tools/contextRestore";
 
 export interface RuntimeManagerOptions {
   readonly sessionStore: SessionStore;
@@ -147,6 +149,12 @@ export class RuntimeManager implements vscode.Disposable {
   private readonly toolRouter: ToolRouter;
   private readonly reviewManager = new FileChangeReviewManager();
   private readonly usageBySession = new Map<string, RuntimeUsage>();
+  /**
+   * Sessions whose provider history was already seeded from the persisted
+   * transcript (once per session lifetime). Providers only accept the seed
+   * into an empty history, so this is just a read-saving guard.
+   */
+  private readonly restoredHistories = new Set<string>();
   /**
    * Managed background processes started by `background_command`. Disposed with
    * the runtime so long-running processes are not orphaned when the extension
@@ -478,6 +486,7 @@ export class RuntimeManager implements vscode.Disposable {
     this.options.permissionManager.cancelSessionRequests(sessionId);
     this.userQuestions.cancelSession(sessionId);
     this.taskPlans.clear(sessionId);
+    this.restoredHistories.delete(sessionId);
     try {
       await this.options.transcriptStore?.delete(sessionId);
     } catch {
@@ -616,6 +625,7 @@ export class RuntimeManager implements vscode.Disposable {
 
     try {
       const providerSessionId = await this.ensureProviderSession(session, runtime, controller.signal);
+      await this.restoreModelHistory(session.sessionId, runtime);
       this.updateSession(sessionId, {
         providerSessionId,
         agentId: providerSessionId,
@@ -646,6 +656,11 @@ export class RuntimeManager implements vscode.Disposable {
           },
           usageSink: (usage) => {
             this.handleRuntimeEvent(sessionId, { type: "usage", sessionId, usage, timestamp: Date.now() });
+          },
+          // Live cumulative snapshots while streaming. Published as partial
+          // usage (display-only): only the final usageSink call accumulates.
+          usageDeltaSink: (usage) => {
+            this.handleRuntimeEvent(sessionId, { type: "usage", sessionId, usage, partial: true, timestamp: Date.now() });
           },
         },
         (event) => this.handleRuntimeEvent(sessionId, event),
@@ -703,6 +718,15 @@ export class RuntimeManager implements vscode.Disposable {
       throw new RuntimeError("invalid_configuration", "There is no previous prompt to retry.");
     }
     await this.startTask(sessionId, prompt, cancellationToken, true);
+  }
+
+  /**
+   * Safe, secret-free execution-environment summary for the active workspace.
+   * Used by the agent prompt and by Settings → About (read-only).
+   */
+  describeExecution(workspacePath?: string): string | undefined {
+    const target = workspacePath ?? this.options.defaultWorkspacePath ?? ".";
+    return this.options.executionManager?.describe(target);
   }
 
   resolvePermission(requestId: string, decision: "ALLOW" | "DENY"): void {
@@ -795,6 +819,35 @@ export class RuntimeManager implements vscode.Disposable {
       await this.options.transcriptStore?.append(sessionId, entry);
     } catch {
       // Transcript persistence must never break an agent run.
+    }
+  }
+
+  /**
+   * Seeds a restarted session's empty provider history from the persisted
+   * transcript (B3). Text-only turns (user/assistant) are restored and capped
+   * through the context budget; tool/command entries are never replayed
+   * because the transcript carries no tool_call_ids to pair them with.
+   * Runs at most once per session; providers additionally refuse to seed a
+   * non-empty history. Best-effort: restoration must never break a run.
+   */
+  private async restoreModelHistory(sessionId: string, runtime: AgentRuntime): Promise<void> {
+    if (this.restoredHistories.has(sessionId) || !runtime.restoreHistory) {
+      return;
+    }
+    this.restoredHistories.add(sessionId);
+    try {
+      const entries = await this.options.transcriptStore?.load(sessionId);
+      if (!entries || entries.length === 0) {
+        return;
+      }
+      const restored = restoreChatTurns(entries);
+      if (restored.length === 0) {
+        return;
+      }
+      const { turns } = compactChatTurns(restored);
+      runtime.restoreHistory(sessionId, turns);
+    } catch {
+      // Restoration is best-effort and must never fail a run.
     }
   }
 
@@ -964,7 +1017,12 @@ export class RuntimeManager implements vscode.Disposable {
     }
   }
 
-  private accumulateUsage(sessionId: string, usage: RuntimeUsage): void {
+  private accumulateUsage(sessionId: string, usage: RuntimeUsage, partial?: boolean): void {
+    // Live snapshots are display-only: only final per-completion usage counts
+    // toward session totals, or streaming runs would double-count.
+    if (partial) {
+      return;
+    }
     const current = this.usageBySession.get(sessionId) ?? { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     this.usageBySession.set(sessionId, {
       promptTokens: current.promptTokens + usage.promptTokens,
@@ -1040,7 +1098,7 @@ export class RuntimeManager implements vscode.Disposable {
     const published = this.recordTranscriptEvent(sessionId, event);
 
     if (published.type === "usage") {
-      this.accumulateUsage(sessionId, published.usage);
+      this.accumulateUsage(sessionId, published.usage, published.partial);
     }
 
     if (published.type === "status") {

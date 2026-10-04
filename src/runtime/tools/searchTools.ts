@@ -72,6 +72,7 @@ export async function grepSearch(
   const pattern = compileTextPattern({ query, isRegex, caseSensitive });
   const fileFilter = optionalString(input, "fileGlob");
   const glob: GlobMatcher | undefined = fileFilter ? compileGlob(fileFilter) : undefined;
+  const includeIgnored = optionalBoolean(input, "includeIgnored") ?? false;
 
   const root = await resolveExistingDirectory(context.workspacePath, requestedPath);
 
@@ -120,6 +121,7 @@ export async function grepSearch(
     ...(context.signal ? { signal: context.signal } : {}),
     maxEntries: SEARCH_LIMITS.globMaxScannedEntries,
     relativeTo: context.workspacePath,
+    includeIgnored,
   });
 
   if (walk.truncated && !truncated) {
@@ -150,6 +152,7 @@ export async function globSearch(
 
   const matcher = compileGlob(patternText);
   const root = await resolveExistingDirectory(context.workspacePath, requestedPath);
+  const includeIgnored = optionalBoolean(input, "includeIgnored") ?? false;
 
   const files: string[] = [];
   let truncated = false;
@@ -169,6 +172,7 @@ export async function globSearch(
     ...(context.signal ? { signal: context.signal } : {}),
     maxEntries: SEARCH_LIMITS.globMaxScannedEntries,
     relativeTo: context.workspacePath,
+    includeIgnored,
   });
 
   if (walk.truncated && !truncated) {

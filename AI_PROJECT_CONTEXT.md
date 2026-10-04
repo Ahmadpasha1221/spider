@@ -239,7 +239,7 @@ fallback contract. `isLocalToolName` is the membership test.
 |---|---|---|---|---|
 | `list_files` | list a directory | `path?` (default `.`) | safe | `{ path, entries[] }` (max 200) |
 | `read_file` | read a text file | `path` (required) | safe | `{ path, content }` |
-| `search_files` | filename+content search | `query` (required), `path?` | safe | `{ query, matches[] }` (max 50) |
+| `search_files` | filename+content search | `query` (required), `path?`, `includeIgnored?` | safe | `{ query, matches[] }` (max 50) |
 | `write_file` | create/overwrite file | `path`, `content` | modify | `{ path, written, bytes }`; captured for review |
 | `edit_file` | exact-string replace | `path`, `old_string`, `new_string` | modify | replaced count; captured for review |
 | `create_directory` | mkdir -p | `path` | modify | `{ path, created }` |
@@ -260,7 +260,7 @@ fallback contract. `isLocalToolName` is the membership test.
 | `kill_command` | stop a Spider-started process | `processId` (required), `force?` | execute | `{ processId, status, message? }` |
 | `ask_user` | ask the user a clarifying question and wait | `question` (required), `options?`, `defaultOption?`, `context?` | safe | `{ requestId, answer, cancelled?, message? }` |
 | `update_todo` | replace the task plan for the current conversation | `items` (required, max 50) | safe | `{ sessionId, items[], updatedAt, counts, inProgressId? }` |
-| `fetch_url` | retrieve one specific https URL | `url` (required), `maxBytes?`, `timeoutMs?` | **external** | `{ url, status, contentType, content, truncated?, unsupported?, redirects?, bytes?, reason?, message? }` |
+| `fetch_url` | retrieve one specific URL (https, http loopback) | `url` (required), `maxBytes?`, `timeoutMs?` | **external** | `{ url, status, contentType, content, truncated?, unsupported?, redirects?, bytes?, reason?, message? }` |
 | `search_web` | search the public web for links + snippets (not a page fetcher) | `query` (required, max 400), `maxResults?` (default 5, max 20), `recencyDays?` | **external** | `{ query, results[{title,url,snippet,source?}], provider?, truncated?, reason?, message? }` |
 | `codebase_search` | intent-oriented repository search over code regions | `query` (required), `maxResults?` (default 8, max 20) | safe | `{ query, results[{path,startLine,endLine,score,matchedTerms[],reason}], scannedFiles, truncated?, reason? }` |
 | `repo_map` | compact structural tree of the repository | `depth?` (default 3, max 6), `path?` | safe | `{ root, tree[], entries, truncated, cancelled? }` |
@@ -270,7 +270,7 @@ fallback contract. `isLocalToolName` is the membership test.
 | `go_to_definition` | resolve the symbol at a position to its definition(s) | `path`, `line`, `character` (all required, zero-based) | safe | `{ path, definitions[{path,range}], truncated?, reason? }` (max 20); empty list + message when none |
 | `find_references` | usages of the symbol at a position | `path`, `line`, `character`, `includeDeclaration?` (default true) | safe | `{ path, includeDeclaration, references[{path,range}], truncated, reason? }` (max 500) |
 | `get_problems` | diagnostics VS Code currently reports | `scope?` (`workspace` default / `file`), `path?` (required for file) | safe | `{ scope, path?, problems[{path,severity,message,source?,code?,range}], summary, truncated, reason?, note? }` (max 500) |
-| `run_tests` | run the project's test suite with an approved runner | `runner` (required, allow-list), `args?` (argv), `cwd?`, `timeoutMs?` (default 120000, max 300000) | **execute** | `{ runner, args, command, cwd, passed, exitCode, durationMs, stdout, stderr, timedOut, cancelled?, truncated, status }` |
+| `run_tests` | run the project's test suite with an approved runner | `runner` (required, allow-list), `args?` (argv) XOR `path?`+`filter?` (target contract), `cwd?`, `timeoutMs?` (default 120000, max 300000) | **execute** | `{ runner, args, command, cwd, path?, filter?, passed, exitCode, durationMs, stdout, stderr, timedOut, cancelled?, truncated, status }` |
 | `finish` | end the task | `summary` | safe | executed inline in the registry (no executor); sets `finished: true` |
 
 ### Shared tool building blocks (Phase 1, 2026-09-29)
@@ -308,7 +308,9 @@ fallback contract. `isLocalToolName` is the membership test.
 - `backgroundProcessManager.ts` (Phase 2) — the managed background-process
   registry (in-memory only, bounded rolling per-stream buffers, retained-
   process cap). `background_command` starts an argv-only process
-  (`shell: false`, `windowsHide: true`); **the tool request is decoupled from
+  (`shell: false`, `windowsHide: true`); when a resolved `context` is passed the
+  launch is backend-aware (WSL bridge) while the record keeps the caller's
+  command/args; **the tool request is decoupled from
   the process lifetime** — cancelling an agent run stops waiting for startup
   but never kills a process that already started. Only `stop()`/`dispose()`/
   `shutdown()` end processes, and a persistent `error` listener records late
@@ -326,9 +328,10 @@ fallback contract. `isLocalToolName` is the membership test.
 - `../state/taskPlan.ts` (Phase 3) — the authoritative per-conversation plan
   (`TaskPlanStore`), separate from the transcript and never persisted to
   credentials/config/logs. Sanitized snapshots ship to the webview only.
-- `../net/urlSecurity.ts` + `fetchUrlTool.ts` + `htmlText.ts` (Phase 3) — SSRF
-  policy (https only; loopback/private/link-local/metadata blocked on the
-  original URL and every redirect, with DNS resolution) plus a bounded,
+- `../net/urlSecurity.ts` + `fetchUrlTool.ts` + `htmlText.ts` (Phase 3, extended
+  2026-10-04) — SSRF policy (https public; http(s) loopback under
+  `LocalNetworkPolicy`, which `fetch_url` passes; private/metadata blocked on
+  the original URL and every redirect, with DNS resolution) plus a bounded,
   script-free fetch that extracts readable text from HTML.
 - `../net/webSearchProvider.ts` + `searchWebTool.ts` (Phase 4) — the ONE search
   provider abstraction (`WebSearchProvider`; `createStoredWebSearchProvider`
@@ -370,10 +373,13 @@ fallback contract. `isLocalToolName` is the membership test.
   normalizer for both `get_diagnostics` and `get_problems`. It reports what
   the editor currently knows and never runs a build; a `note` tells the model
   diagnostics may lag a fresh edit. Capped at 500 with a severity summary.
-- `runTestsTool.ts` (Phase 5) — `run_tests`: a fixed allow-list of runner
+- `runTestsTool.ts` (Phase 5, extended 2026-10-04) — `run_tests`: a fixed allow-list of runner
   executables (`pnpm`, `npm`, `yarn`, `pytest`, `python`, `python3`, `cargo`,
   `go`), argv-only args (no shell string can exist), workspace-validated cwd,
   bounded timeout (default 120 s, max 300 s) and bounded stdout/stderr. The
+  `path`/`filter` target contract translates to runner-native argv
+  (`buildTargetArgs`: pytest `-k`, js `-t`, go `-run`, cargo positional) and
+  is mutually exclusive with raw `args`. The
   process is started and awaited through `BackgroundProcessManager.start()`
   plus the `whenClosed()` completion wait, so timeout/cancellation reuse the
   existing kill machinery (graceful-then-forced) — no second process registry.
@@ -402,9 +408,15 @@ workspace path never tells us which OS/shell/environment commands run in.
   secret-free summary).
 - `executionManager.ts` — `ExecutionManager`: resolves + caches the context per
   workspace, `invalidate()`/`updateEnvironment()` on workspace or shell change,
-  `resolveCwd(workspace, hostPath)` path translation, `describe(workspace)` for
-  the agent prompt, and `buildCommandInvocation(context, command, cwd)` which
-  produces an **argv-only** launch (`shell: false`) for each backend.
+  `resolveCwd(workspace, hostPath)` path translation (delegated to a
+  `WorkspacePathTranslator`), `describe(workspace)` for the agent prompt,
+  `buildCommandInvocation(context, command, cwd)` for shell-string commands and
+  `buildArgvInvocation(context, command, args, cwd)` for argv commands — both
+  produce an **argv-only** launch (`shell: false`) for each backend.
+- `pathTranslator.ts` — the `WorkspacePathTranslator` seam (`localPathTranslator`
+  identity, `wslUncPathTranslator` re-roots a UNC path onto the Linux side and
+  rejects escapes). Container/remote mappings can be added here without
+  touching the manager.
 
 Resolution precedence (VS Code facts only — never `wsl --list`, `which`,
 `find`, `pwd` probing):
@@ -433,6 +445,14 @@ PowerShell uses `-NoProfile -Command`; POSIX uses `<shell> -c`.
 environment or prefixes `wsl.exe`/`cmd.exe`/`bash.exe`.
 An unresolvable context throws `ExecutionContextError`, mapped by the executor
 to `dependency_unavailable` — never a silent fallback to another shell.
+`background_command` and `run_tests` resolve through the same manager
+(`BackgroundProcessStartRequest.context`): their argv launches are bridged with
+`buildArgvInvocation` (e.g. `wsl.exe -d <distro> --cd <cwd> -- <exe> <args>`)
+while the process record still reports the caller's command/args.
+Optional explicit overrides `spider.execution.shell` and
+`spider.execution.wslDistro` (VS Code settings) populate
+`ExecutionEnvironment.configuredShell`/`configuredWslDistro`; a read-only
+summary appears in Settings → About (`ExtensionInfoView.executionContext`).
 The 120 ms `command_output` coalescing, permissions, cancellation, timeouts and
 stdout/stderr streaming are unchanged: only the resolved launch is new.
 
@@ -563,8 +583,10 @@ sent as `Authorization: Bearer` headers — never URLs, never logs.
   the **same** `tool_call_id`, and `toOpenAiMessages` throws if a tool turn
   has an empty id. Parallel calls keep their own ids (tests:
   `call_123` round-trip, `call_1`/`call_2` mapping, post-tool "hi" message).
-- Streaming: `stream: false` today for chat completions (deltas come from the
-  mock/Ollama paths); capability `streaming` is still honored.
+- Streaming: `stream: true` with `stream_options.include_usage` whenever a
+  delta hook is present (live cumulative usage via `usageDeltaSink` as
+  partial events; terminal usage stays authoritative); capability `streaming`
+  is still honored.
 - Errors: 401/403 → `authentication_failed`; 429 → retryable
   `provider_unavailable`; 404 → `model_unavailable`; 5xx → retryable.
 - Tests: `test/unit/runtime/openrouter/openRouterRuntime.test.ts`,
@@ -1028,10 +1050,13 @@ compress content). Section state: `AppState.settingsSection`.
     Background processes are never persisted, so a restart never touches a
     stale PID.
 29. Network access is limited to `fetch_url` and `search_web`. `fetch_url`
-    stays SSRF-safe: https only, loopback/private/link-local/cloud-metadata
-    blocked (by literal and by resolved address) on the original URL *and* every
-    redirect, bounded size, redirect count and timeout, script-free HTML
-    extraction, and no cache. `search_web` discovers URLs through the
+    stays SSRF-safe: https for the public web plus http(s) loopback for local
+    dev servers (`localhost`, `127.0.0.0/8`, `::1`) under the local-network
+    policy; private/LAN/link-local/cloud-metadata blocked (by literal and by
+    resolved address) on the original URL *and* every redirect, bounded size,
+    redirect count and timeout, script-free HTML extraction, and no cache.
+    Loopback allowance is approvable (not auto-approved): the tool still
+    requires the `external` permission. `search_web` discovers URLs through the
     `WebSearchProvider` abstraction, reading its credential lazily from
     SecretStorage (never webview state, transcripts, or workspace files) and
     returning only bounded title/url/snippet data; it never fetches a page.
@@ -1050,6 +1075,9 @@ compress content). Section state: `AppState.settingsSection`.
     runner executable must be one of the approved names (never a path, never a
     shell), args are argv entries (`shell: false`, so injection is structurally
     impossible), cwd is workspace-validated, and timeout is capped at 300 s.
+    Targeted runs use the `path`/`filter` contract (translated per runner:
+    pytest `-k`, js `-t`, go `-run`, cargo positional), which is mutually
+    exclusive with raw `args` so flag ordering can never silently reselect.
     It must never widen into a generic `run_command` replacement.
 33. VS Code language intelligence (`list_symbols`, `go_to_definition`,
     `find_references`, `get_problems`) is read-only, host-only, and normalized:
@@ -1107,9 +1135,16 @@ compress content). Section state: `AppState.settingsSection`.
 - Chat completions now stream (`stream: true` + SSE) on OpenAI-compatible and
   OpenRouter whenever a delta hook is present; Ollama and Mock stream via
   their own paths. Non-streaming JSON calls remain for capability checks and
-  tests.
-- In-runtime model history is memory-only; after a VS Code restart a session
-  continues with an empty model history (transcript display is preserved).
+  tests. Streams request `stream_options.include_usage` so terminal usage
+  arrives over SSE; live cumulative snapshots flow as partial `usage` events
+  (display-only, never accumulated — only final per-completion usage counts).
+- In-runtime model history is memory-only, but since 2026-10-04 a restart
+  deterministically seeds it from the transcript: text-only user/assistant
+  turns (capped, budget-compacted) via `AgentRuntime.restoreHistory`, once per
+  session, only into empty histories. Tool history is intentionally NOT
+  restored (no ids to pair) — the model continues from readable conversation.
+- Provider usage `costUsd` is plumbed end-to-end but no provider computes it
+  yet (OpenRouter pricing is catalog-only).
 - Cursor SDK path is legacy; restored sessions skip non-cursor providers in
   RuntimeManager (`restoreSessions` filters `provider === "cursor"` the other
   way around in AgentManager — each manager owns its provider).
@@ -1117,17 +1152,20 @@ compress content). Section state: `AppState.settingsSection`.
   titles yet.
 
 ### Architectural Risks
-- Tool search runs in-process (no ripgrep/native backend yet) and does not
-  honor `.gitignore` — it uses a built-in ignore set. Both are intentional and
-  remain the top native-search candidates (Phase 3).
+- Tool search runs in-process (no ripgrep/native backend yet) but now honors
+  `.gitignore` (root + per-directory, with `includeIgnored` escape hatch) on
+  top of the built-in denylist. A native backend remains the top search
+  candidate; it needs execution-environment routing (WSL/remote), which is a
+  separate design.
 - `background_command` output is kept in bounded in-memory buffers;
   `get_command_output`/`kill_command` (Phase 3) layer on the existing
   `BackgroundProcessManager.output()`/`stop()`/`list()` and never persist
   output across restarts.
 - `fetch_url` performs direct bounded requests (no cache/ETag/Last-Modified).
-  It rejects `http://` outright (an unencrypted local-network path would widen
-  the SSRF surface), so local dev servers are intentionally out of scope until
-  an explicit local-network policy exists.
+  Since 2026-10-04 it allows http(s) loopback (`localhost`, `127/8`, `::1`)
+  under the local-network policy (still `external`-permission gated); LAN,
+  metadata and non-loopback http stay blocked, and DNS-rebind TOCTOU is a
+  documented limitation.
 - `search_web` needs a provider credential
   (`WEB_SEARCH_API_KEY_SECRET_KEY`). Without one it fails as
   `dependency_unavailable` and the agent can fall back to `fetch_url` on a
@@ -1143,8 +1181,8 @@ compress content). Section state: `AppState.settingsSection`.
   `go_to_definition`/`find_references` fail as `dependency_unavailable`, and
   `get_problems` sees only what the language servers have reported so far.
 - `run_tests` timeout is capped at 300 s; longer suites need
-  `background_command` + `get_command_output`. There is no per-test filtering
-  contract yet — args pass straight to the runner (still argv-only).
+  `background_command` + `get_command_output`. Targeted runs use the formal
+  `path`/`filter` → argv contract (mutually exclusive with raw `args`).
 - `gui/src/protocol.ts` and `src/webview/types.ts` can drift (manual sync).
 - `ChatTurn` shape changes must update both runtimes and the serializer —
   TypeScript catches most, but runtime id semantics are only test-enforced.
@@ -1238,11 +1276,13 @@ compress content). Section state: `AppState.settingsSection`.
   diagnostics source: the tools talk to an `EditorContextSource`, VS Code is
   imported lazily, and only workspace-relative identity plus redacted/capped
   selection text reaches the model.
-- **fetch_url is https-only SSRF-checked per hop (2026-09-30)** — rather than
-  trusting the first hostname, each redirect target is re-parsed, re-resolved
-  and re-validated, so a public URL cannot bounce the agent onto loopback or a
-  cloud metadata endpoint. No cache was added: a bounded direct request is the
-  right complexity for one URL.
+- **fetch_url allows loopback under policy, LAN stays blocked (2026-10-04)** —
+  `parseFetchUrl`/`assertFetchableUrl` take a `LocalNetworkPolicy`; the tool
+  passes `allowLocalNetwork` so `http://localhost:3000` works while
+  `192.168.x`, link-local, metadata and non-loopback http stay rejected on
+  every hop (redirects included). DNS is still resolved per hop; rebinding
+  between check and connect (TOCTOU) is a documented limitation whose blast
+  radius is the developer's own machine.
 - **Web search is a provider interface, not a vendor call (2026-09-30)** —
   `search_web` talks to `WebSearchProvider`; the default implementation is
   Brave-compatible, reads its key lazily from SecretStorage, and can be
@@ -1264,6 +1304,30 @@ compress content). Section state: `AppState.settingsSection`.
   webview and back, with cancellation on run end / webview dispose. It is kept
   strictly separate from the permission pipeline so a question can never be
   used to approve a command.
+- **Search honors .gitignore with an includeIgnored escape hatch (2026-10-04)** —
+  `gitignore.ts` parses root + per-directory `.gitignore` files (negation,
+  dir-only, anchored, `**`, basename rules; git precedence) and the shared
+  walker plus `repo_map` skip ignored paths by default. The hardcoded
+  generated-directory denylist remains as a safety/performance floor even
+  with `includeIgnored: true`. No native backend was added: the walker is
+  still in-process (ripgrep would need execution-environment routing through
+  WSL/remote, which is a separate design).
+- **Stored history is complete, the model sees a budgeted view (2026-10-04)** —
+  `contextManager.ts` (`estimateTokens` at a documented ~4 chars/token,
+  `compactChatTurns`) narrows what `completeChat` receives while the stored
+  `ChatTurn[]` is never mutated: system turn + latest prompt always kept,
+  assistant `tool_calls` + its results kept/dropped as one atomic unit (never
+  an orphaned tool message), oldest units dropped first. The loop applies the
+  default 100k-token budget on every model call (normal runs never trigger
+  it) with an `onCompaction` observability hook — truncation is reported,
+  never silent.
+- **Restoration is text-only, never a replayed tool history (2026-10-04)** —
+  transcripts carry no `tool_call_id`s, so `contextRestore.ts` rebuilds only
+  user/assistant turns (capped, budget-compacted) and `AgentRuntime.
+  restoreHistory` seeds providers only into empty histories (once per session
+  via `RuntimeManager.restoredHistories`). After a restart the model continues
+  from readable conversation, explicitly without tool memory — no fabricated
+  ids, no invalid conversations.
 - **run_tests is allow-listed and manager-owned (2026-09-30)** — the runner
   comes from a fixed name set and the process lifecycle is the existing
   `BackgroundProcessManager`'s (a new `whenClosed()` completion wait with
@@ -1280,6 +1344,20 @@ compress content). Section state: `AppState.settingsSection`.
 
 ## 17. Current Development Status
 
+- **Completed (2026-10-04, engine gaps B2/B3/B4/B6/B7/B10):**
+  `.gitignore`-aware search (`gitignore.ts` + walker + `repo_map`,
+  `includeIgnored` on search tools, hardcoded denylist kept as floor);
+  deterministic text-only history restore (`contextRestore.ts` +
+  `AgentRuntime.restoreHistory`, once per session into empty histories);
+  explicit context budgets (`contextManager.ts`, default 100k est. tokens,
+  tool-pair atomicity, `onCompaction` hook, loop-wired); live streaming usage
+  (`stream_options.include_usage`, `usageDeltaSink` → partial `usage` events,
+  display-only, no double-count); loopback http(s) policy for `fetch_url`
+  (LAN/metadata still blocked, `external` permission still gates); formal
+  `run_tests` `path`/`filter` → argv contract (mutually exclusive with raw
+  `args`). Deferred by design: semantic embeddings (B1), web multi-provider
+  fallback (B5), tree-sitter fallback (B8), GitHub remote (B9). 790 unit
+  tests, lint 0 warnings, typecheck + compile green.
 - **Completed (2026-10-04, execution environment architecture):**
   `src/runtime/execution/` (types, pure resolvers, `ExecutionManager`,
   backend-aware `buildCommandInvocation`) resolves commands from VS Code facts
@@ -1289,6 +1367,16 @@ compress content). Section state: `AppState.settingsSection`.
   injected into the agent prompt; the 120 ms streaming, permissions, timeout
   and cancellation paths are unchanged. 735 unit tests (24 new execution
   tests), lint 0 warnings, typecheck + compile green.
+- **Completed (2026-10-04, execution-environment follow-ups):**
+  `background_command` and `run_tests` now resolve through the same
+  `ExecutionManager` (argv launch bridged to WSL when needed); a
+  `WorkspacePathTranslator` seam replaces the inline translation and adds the
+  container/remote extension point; new tests cover the full
+  `ToolRouter → executor → context → runner` chain, the system-prompt summary,
+  and fuzz paths/argv for spaces/special characters/escapes; optional
+  `spider.execution.shell` / `spider.execution.wslDistro` overrides and a
+  read-only Settings → About execution row were added. 744 unit tests (88
+  files), lint 0 warnings, typecheck + compile green.
 - **Completed (2026-09-25/26):** OpenAI-compatible tool-call id lifecycle +
   regression tests; provider config persistence (+ restore at activation);
   dedicated History page + "History" terminology; Spider rebrand (display

@@ -192,6 +192,13 @@ export interface RuntimeSendRequest {
   readonly onStreamDelta?: (text: string) => void;
   /** Usage hook: called once per model completion with token counts. */
   readonly usageSink?: (usage: RuntimeUsage) => void;
+  /**
+   * Live usage hook: called while a stream is still open when the provider
+   * reports running totals. Values are cumulative snapshots for the current
+   * completion (not deltas to add) and are never accumulated — only the
+   * final `usageSink` call counts toward session totals.
+   */
+  readonly usageDeltaSink?: (usage: RuntimeUsage) => void;
 }
 
 export interface RuntimeCancelRequest {
@@ -222,7 +229,7 @@ export type RuntimeEvent =
       timestamp: number;
     }
   | { type: "text_delta"; sessionId: string; text: string; timestamp: number }
-  | { type: "usage"; sessionId: string; usage: RuntimeUsage; timestamp: number }
+  | { type: "usage"; sessionId: string; usage: RuntimeUsage; timestamp: number; partial?: boolean }
   | { type: "file_change"; sessionId: string; change: FileChangeSummary; timestamp: number }
   | { type: "file_change_reverted"; sessionId: string; change: FileChangeSummary; timestamp: number }
   | { type: "tool_call"; sessionId: string; toolCall: RuntimeToolCall; timestamp: number }
@@ -344,4 +351,23 @@ export interface AgentRuntime {
   sendMessage(request: RuntimeSendRequest, emit: RuntimeEventSink): Promise<void>;
   cancel(request: RuntimeCancelRequest): Promise<void>;
   dispose(): void;
+  /**
+   * Seeds a fresh (empty) model history from restored transcript turns —
+   * used once per session after a restart, when the in-memory history was
+   * lost but the persisted transcript survived. Implementations must only
+   * seed when their current history is empty (never overwrite live history)
+   * and return whether they seeded. Turns are text-only by construction
+   * (see contextRestore), so no tool_call_id pairing can break.
+   */
+  restoreHistory?(sessionId: string, turns: readonly RestoredHistoryTurn[]): boolean;
+}
+
+/**
+ * Text-only conversation turn safe for history restoration. No `tool` role,
+ * no `tool_calls`: replaying tool turns without their original provider ids
+ * would produce an invalid conversation.
+ */
+export interface RestoredHistoryTurn {
+  readonly role: "user" | "assistant";
+  readonly content: string;
 }

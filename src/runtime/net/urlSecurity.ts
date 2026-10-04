@@ -34,6 +34,24 @@ export class UrlSecurityError extends Error {
 /** Only HTTPS: http/file/data/javascript/ftp etc. are rejected outright. */
 export const ALLOWED_PROTOCOLS: readonly string[] = ["https:"];
 
+/**
+ * Local-network policy for `fetch_url`. Loopback access (the developer's own
+ * machine: `localhost`, `127.0.0.0/8`, `::1`) is a separate question from
+ * public-web access. When `allowLocalNetwork` is set, loopback destinations
+ * are reachable over `http:` or `https:` — the common case is a local dev
+ * server (`http://localhost:3000`). Everything else (LAN ranges, link-local,
+ * cloud metadata, DNS that resolves non-loopback) stays blocked exactly as
+ * before. Loopback still requires the tool's `external` permission, so the
+ * user approves the request; this policy only decides what the user *can*
+ * approve.
+ */
+export interface LocalNetworkPolicy {
+  readonly allowLocalNetwork?: boolean;
+}
+
+/** Loopback hostnames that need no DNS lookup (the OS guarantees them). */
+const LOOPBACK_HOSTNAMES: ReadonlySet<string> = new Set(["localhost"]);
+
 export type HostResolver = (hostname: string) => Promise<readonly string[]>;
 
 /** Hostnames that must never be contacted regardless of what DNS says. */
@@ -47,7 +65,7 @@ const BLOCKED_HOSTNAMES: ReadonlySet<string> = new Set([
 
 const BLOCKED_HOST_SUFFIXES: readonly string[] = [".localhost", ".local", ".internal", ".home.arpa"];
 
-export function parseFetchUrl(raw: unknown): URL {
+export function parseFetchUrl(raw: unknown, policy: LocalNetworkPolicy = {}): URL {
   if (typeof raw !== "string" || raw.trim().length === 0) {
     throw new UrlSecurityError("invalid_url", "A non-empty url string is required.");
   }
@@ -57,10 +75,15 @@ export function parseFetchUrl(raw: unknown): URL {
   } catch {
     throw new UrlSecurityError("invalid_url", "That is not a valid absolute URL.");
   }
-  if (!ALLOWED_PROTOCOLS.includes(url.protocol)) {
+  // Plain http reaches the parser only for loopback under an explicit local
+  // policy; the destination check in assertFetchableUrl enforces that.
+  const schemeOk = url.protocol === "https:" || (url.protocol === "http:" && policy.allowLocalNetwork === true);
+  if (!schemeOk) {
     throw new UrlSecurityError(
       "unsupported_scheme",
-      `Only https URLs are supported (received "${url.protocol.replace(":", "")}").`,
+      url.protocol === "http:"
+        ? "Plain http is only supported for localhost loopback destinations."
+        : `Only https URLs are supported (received "${url.protocol.replace(":", "")}").`,
     );
   }
   if (url.username.length > 0 || url.password.length > 0) {
@@ -155,12 +178,48 @@ function isPrivateIpv6(address: string): boolean {
  * rejected before any request is made.
  */
 export async function assertPublicUrl(url: URL, resolveHost: HostResolver): Promise<void> {
+  return assertFetchableUrl(url, resolveHost, {});
+}
+
+/**
+ * Policy-aware destination check. Under `allowLocalNetwork`, loopback
+ * destinations pass for `http:` and `https:`; every other destination follows
+ * the strict public rules (https only, no private/link-local/metadata, DNS
+ * verified) regardless of policy.
+ *
+ * Known limitation: DNS is checked once before the request (TOCTOU). A
+ * hostile name could re-resolve between check and connect; the policy narrows
+ * the reachable set but does not eliminate rebinding. Loopback-only allowance
+ * keeps the blast radius at the developer's own machine.
+ */
+export async function assertFetchableUrl(url: URL, resolveHost: HostResolver, policy: LocalNetworkPolicy): Promise<void> {
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new UrlSecurityError("unsupported_scheme", "Only https URLs are supported (http for localhost loopback only).");
+  }
   const host = normalizeHostname(url.hostname);
   if (isIP(host) !== 0) {
+    if (isLoopbackAddress(host)) {
+      if (policy.allowLocalNetwork !== true) {
+        throw new UrlSecurityError("blocked_address", "Requests to local or private network addresses are not allowed.");
+      }
+      return;
+    }
     if (isPrivateAddress(host)) {
       throw new UrlSecurityError("blocked_address", "Requests to local or private network addresses are not allowed.");
     }
+    if (url.protocol !== "https:") {
+      throw new UrlSecurityError("unsupported_scheme", "Plain http is only supported for localhost loopback destinations.");
+    }
     return;
+  }
+  if (isLoopbackHostname(host)) {
+    if (policy.allowLocalNetwork !== true) {
+      throw new UrlSecurityError("blocked_host", "Requests to local or internal hostnames are not allowed.");
+    }
+    return;
+  }
+  if (url.protocol !== "https:") {
+    throw new UrlSecurityError("unsupported_scheme", "Plain http is only supported for localhost loopback destinations.");
   }
   if (BLOCKED_HOSTNAMES.has(host) || BLOCKED_HOST_SUFFIXES.some((suffix) => host.endsWith(suffix))) {
     throw new UrlSecurityError("blocked_host", "Requests to local or internal hostnames are not allowed.");
@@ -175,6 +234,17 @@ export async function assertPublicUrl(url: URL, resolveHost: HostResolver): Prom
   if (addresses.length === 0) {
     throw new UrlSecurityError("dns_failure", `Could not resolve ${host}.`);
   }
+  const allLoopback = addresses.every((address) => isLoopbackAddress(address));
+  if (allLoopback) {
+    // A public name resolving to loopback (split-horizon DNS, dev tunnels).
+    if (policy.allowLocalNetwork !== true) {
+      throw new UrlSecurityError(
+        "blocked_address",
+        "That hostname resolves to a local or private address, which is not allowed.",
+      );
+    }
+    return;
+  }
   for (const address of addresses) {
     if (isPrivateAddress(address)) {
       throw new UrlSecurityError(
@@ -183,4 +253,27 @@ export async function assertPublicUrl(url: URL, resolveHost: HostResolver): Prom
       );
     }
   }
+}
+
+/** True for `localhost` (and its subdomains); the OS guarantees loopback. */
+export function isLoopbackHostname(hostname: string): boolean {
+  const host = normalizeHostname(hostname);
+  return LOOPBACK_HOSTNAMES.has(host) || host.endsWith(".localhost");
+}
+
+/** True for 127.0.0.0/8, ::1, and IPv4-mapped loopback forms. */
+export function isLoopbackAddress(address: string): boolean {
+  const host = normalizeHostname(address);
+  if (isIP(host) !== 4 && isIP(host) !== 6) {
+    return false;
+  }
+  if (isIP(host) === 4) {
+    return host.split(".")[0] === "127";
+  }
+  const lower = host.toLowerCase();
+  if (lower === "::1") {
+    return true;
+  }
+  const mapped = /^::(?:ffff:)?(\d{1,3}(?:\.\d{1,3}){3})$/.exec(lower);
+  return mapped?.[1]?.split(".")[0] === "127";
 }

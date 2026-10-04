@@ -64,6 +64,7 @@ export async function codebaseSearch(
 ): Promise<CodebaseSearchResult> {
   const query = parseQuery(input.query);
   const maxResults = clampInt(input.maxResults, CODEBASE_SEARCH_LIMITS.defaultResults, CODEBASE_SEARCH_LIMITS.maxResults);
+  const includeIgnored = input.includeIgnored === true;
   const terms = tokenize(query);
 
   if (context.signal?.aborted) {
@@ -90,6 +91,7 @@ export async function codebaseSearch(
       ...(context.signal ? { signal: context.signal } : {}),
       maxEntries: CODEBASE_SEARCH_LIMITS.maxScannedFiles,
       relativeTo: context.workspacePath,
+      includeIgnored,
     },
   );
 
