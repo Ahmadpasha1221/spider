@@ -89,6 +89,13 @@ export class AgentWebviewHost implements vscode.Disposable {
           AgentEditorPanel.createOrShow(this.extensionUri, this);
           return;
         }
+        if (isOpenUrlMessage(message)) {
+          // Markdown link click: only http(s) leaves the
+          // extension; everything else is ignored. The webview
+          // itself never navigates.
+          this.openExternalUrl(message.url);
+          return;
+        }
         this.messageRouter.handleMessage(message).then(
           (result) => {
             if (isExtensionMessage(result) && shouldForwardResult(result.type)) {
@@ -145,8 +152,7 @@ export class AgentWebviewHost implements vscode.Disposable {
   }
 
   /** Opens (or reveals) the History editor tab. */
-  openHistory(): void {
-    HistoryPanel.createOrShow(this.extensionUri, {
+  openHistory(): void {    HistoryPanel.createOrShow(this.extensionUri, {
       listSessions: () => ({
         sessions: this.collectSessions(),
         activeSessionId: this.activeSessionId(),
@@ -170,6 +176,25 @@ export class AgentWebviewHost implements vscode.Disposable {
         return isTranscriptMessage(result) ? result.entries : [];
       },
     });
+  }
+
+  /** Opens an http(s) URL in the user's default browser. */
+  openExternalUrl(url: string): void {
+    const trimmed = url.trim();
+    if (!/^https?:\/\//i.test(trimmed)) {
+      // Only plain web links leave the extension. `javascript:`,
+      // `data:`, `vscode-file://` etc. never reach the OS browser.
+      return;
+    }
+    void vscode.env.openExternal(vscode.Uri.parse(trimmed)).then(
+      () => undefined,
+      (error: unknown) => {
+        AgentWebviewHost.logger.warn("Failed to open external URL", {
+          operation: "openExternalUrl",
+          outcome: `error: ${String(error)}`,
+        });
+      },
+    );
   }
 
   /** Pushes the current conversation list to every surface. */
@@ -300,6 +325,15 @@ function isOpenAgentEditorMessage(value: unknown): value is { type: "OPEN_AGENT_
     typeof value === "object"
     && value !== null
     && (value as { type?: unknown }).type === "OPEN_AGENT_EDITOR"
+  );
+}
+
+function isOpenUrlMessage(value: unknown): value is { type: "OPEN_URL"; url: string } {
+  return (
+    typeof value === "object"
+    && value !== null
+    && (value as { type?: unknown }).type === "OPEN_URL"
+    && typeof (value as { url?: unknown }).url === "string"
   );
 }
 

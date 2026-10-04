@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import type { ExecutionContext } from "../execution/executionTypes";
+import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
 import { buildArgvInvocation } from "../execution/executionManager";
 
 /**
@@ -59,11 +59,17 @@ export interface BackgroundProcessStartRequest {
    */
   readonly signal?: AbortSignal;
   /**
-   * Resolved execution context. When present, the process is launched through
-   * the context's backend (local shell environment or the WSL bridge) instead
-   * of the extension host's default environment.
+   * Resolved execution context. REQUIRED.
+   *
+   * Every background process must carry a validated ExecutionContext produced by
+   * ExecutionManager.resolve(). This ensures the process is launched through the
+   * correct backend (local / WSL / remote) with argv-only (shell: false).
+   *
+   * Security invariant: if context is absent, the start() call throws
+   * ExecutionContextError. A missing context is a configuration error, not a
+   * reason to fall back to an uncontrolled environment.
    */
-  readonly context?: ExecutionContext;
+  readonly context: ExecutionContext;
 }
 
 export interface BackgroundProcessStartResult extends BackgroundProcessInfo {
@@ -179,12 +185,23 @@ export class BackgroundProcessManager {
       return this.toStartResult(record, { cancelled: true });
     }
 
+    // Security invariant: context must be a valid ExecutionContext object.
+    // We validate this at runtime in addition to the TypeScript type, because
+    // callers can arrive through JavaScript, tests with cast types, or
+    // configuration paths that bypass strict checking.
+    if (!request.context || typeof request.context !== "object") {
+      record.markClosed();
+      throw new ExecutionContextError(
+        "Execution context is required before starting background processes. " +
+        "A missing or invalid ExecutionContext is treated as a security failure — " +
+        "Spider will not fall back to uncontrolled process spawning.",
+      );
+    }
+
     // The ExecutionManager decides WHERE the process runs. With a context the
     // launch is backend-aware (e.g. bridged into a WSL distro); the record still
     // reports the caller's command/args, so output identity is unchanged.
-    const invocation = request.context
-      ? buildArgvInvocation(request.context, request.command, args, request.cwd)
-      : { file: request.command, args, cwd: request.cwd as string | undefined, env: undefined };
+    const invocation = buildArgvInvocation(request.context, request.command, args, request.cwd);
 
     let child: ChildProcess;
     try {

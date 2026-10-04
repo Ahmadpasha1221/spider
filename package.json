@@ -112,6 +112,11 @@
           "type": "string",
           "default": "",
           "description": "Override the WSL distro Spider runs commands in when the workspace is inside WSL. Empty uses the distro reported by VS Code / the workspace path."
+        },
+        "spider.rules.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Load .spiderrules files from the workspace and inject them as project instructions in the agent's system prompt. Nested rules apply under their directory; root rules apply everywhere."
         }
       }
     },
@@ -162,10 +167,13 @@
     "package": "pnpm run vscode:prepublish && node scripts/stage-vsix.js"
   },
   "dependencies": {
-    "@cursor/sdk": "1.0.35"
+    "@cursor/sdk": "1.0.35",
+    "dompurify": "^3.4.16",
+    "marked": "^18.0.14"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@types/dompurify": "^3.2.0",
     "@types/mocha": "^10.0.0",
     "@types/node": "^22.13.0",
     "@types/vscode": "^1.95.0",
@@ -177,6 +185,7 @@
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.25.0",
     "eslint": "^9.15.0",
+    "jsdom": "^30.1.2",
     "prettier": "^3.4.0",
     "typescript": "^5.8.0",
     "vitest": "^2.1.8"

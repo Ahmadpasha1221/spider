@@ -59,10 +59,12 @@ export interface ExecutionContext {
   readonly shell: ExecutionShell;
   readonly backend: ExecutionBackendKind;
   /**
-   * Absolute working directory *in the execution environment* (a Linux path for
+   * Absolute workspace root *in the execution environment* (a Linux path for
    * WSL, a native Windows path for a local Windows workspace).
+   * This is the workspace root, not the command's working directory.
+   * Use `resolveExecutionCwd` to derive a command's working directory.
    */
-  readonly cwd: string;
+  readonly workspaceRoot: string;
   /** Absolute shell executable to invoke, when one was authoritatively known. */
   readonly shellPath?: string;
   /** Environment variables for the executed process (host environment). */

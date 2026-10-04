@@ -50,7 +50,9 @@ export type WebviewMessage =
   | { type: "ANSWER_USER_QUESTION"; requestId: string; answer: string }
   /** `ask_user`: the user dismissed the question without answering. */
   | { type: "CANCEL_USER_QUESTION"; requestId: string }
-  | { type: "GET_EXTENSION_INFO" };
+  | { type: "GET_EXTENSION_INFO" }
+  /** Markdown link click: open the URL outside the webview. */
+  | { type: "OPEN_URL"; url: string };
 
 export type AuthStatus = "disconnected" | "connecting" | "connected" | "error";
 

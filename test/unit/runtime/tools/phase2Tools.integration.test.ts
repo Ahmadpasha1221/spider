@@ -18,6 +18,7 @@ import {
 } from "../../../../src/runtime/tools/toolRegistry";
 import { availableToolNames } from "../../../../src/runtime/tools/toolAvailability";
 import { makeSession, makeWorkspace, type TestWorkspace } from "./toolTestUtils";
+import { ExecutionManager } from "../../../../src/runtime/execution/executionManager";
 
 type SpawnFn = NonNullable<BackgroundProcessManagerOptions["spawnFn"]>;
 
@@ -144,11 +145,23 @@ async function setup() {
     immediateExitGraceMs: 0,
     killGraceMs: 10,
   });
+  // Provide a real ExecutionManager for the current platform so background_command
+  // and run_command have the required execution context (security invariant).
+  const executionManager = new ExecutionManager({
+    environment: {
+      hostPlatform: process.platform,
+      terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+      ) as Record<string, string>,
+    },
+  });
   const executor = new WorkspaceToolExecutor({
     diagnostics: fakeDiagnostics(created),
     git: scriptedGitRunner(),
     editor: fakeEditor,
     backgroundProcesses,
+    executionManager,
   });
   const router = new ToolRouter(executor);
   const session = makeSession(created.root);
@@ -253,8 +266,18 @@ describe("Phase 2 workflows through the real registry, router and executor", () 
     const created = await makeWorkspace({ "src/index.ts": "const a = 1;\n" });
     workspaces.push(created);
     const spawn = makeFakeSpawn();
+    const executionManager = new ExecutionManager({
+      environment: {
+        hostPlatform: process.platform,
+        terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+        env: Object.fromEntries(
+          Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+        ) as Record<string, string>,
+      },
+    });
     const executor = new WorkspaceToolExecutor({
       backgroundProcesses: new BackgroundProcessManager({ spawnFn: spawn.spawnFn, immediateExitGraceMs: 0 }),
+      executionManager,
     });
     const router = new ToolRouter(executor);
     const session = makeSession(created.root);

@@ -19,6 +19,7 @@ import {
 import { MessageRouter } from "../../../../src/webview/messageRouter";
 import type { RuntimeToolExecutorContext } from "../../../../src/runtime/runtimeTypes";
 import { makeSession } from "./toolTestUtils";
+import { ExecutionManager } from "../../../../src/runtime/execution/executionManager";
 
 type SpawnFn = NonNullable<BackgroundProcessManagerOptions["spawnFn"]>;
 
@@ -27,6 +28,18 @@ class FakeChild extends EventEmitter {
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
   readonly kill = (): boolean => true;
+}
+
+function makeExecutionManager(_workspacePath: string): ExecutionManager {
+  return new ExecutionManager({
+    environment: {
+      hostPlatform: process.platform,
+      terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+      ) as Record<string, string>,
+    },
+  });
 }
 
 function makeExecutor(fetchFn?: typeof fetch) {
@@ -42,6 +55,7 @@ function makeExecutor(fetchFn?: typeof fetch) {
     backgroundProcesses: manager,
     ...(fetchFn ? { fetch: fetchFn } : {}),
     resolveHost: async () => ["93.184.216.34"],
+    executionManager: makeExecutionManager("."),
   });
   return { executor, manager, latest: () => children[children.length - 1] as FakeChild };
 }

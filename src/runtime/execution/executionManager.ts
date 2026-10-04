@@ -1,6 +1,7 @@
 import {
   describeExecutionContext,
   resolveExecutionContext,
+  buildWslEnvironment,
 } from "./executionContext";
 import { translatorFor } from "./pathTranslator";
 import {
@@ -80,7 +81,7 @@ export class ExecutionManager {
       platform: context.platform,
       shell: context.shell,
       backend: context.backend,
-      cwd: context.cwd,
+      workspaceRoot: context.workspaceRoot,
       ...(context.wslDistro ? { wslDistro: context.wslDistro } : {}),
       ...(context.remoteAuthority ? { remoteAuthority: context.remoteAuthority } : {}),
     });
@@ -94,9 +95,20 @@ export class ExecutionManager {
    * side. This is a deliberate abstraction, not string replacement: the mapping
    * is anchored to the real workspace root.
    */
-  resolveCwd(workspacePath: string, hostAbsolutePath: string): string {
+  resolveExecutionCwd(workspacePath: string, hostAbsolutePath: string): string {
     const context = this.resolve(workspacePath);
     return translatorFor(context).toExecutionCwd(workspacePath, hostAbsolutePath, context);
+  }
+
+  /**
+   * Resolves the execution context and the execution working directory in one
+   * atomic operation. This is the primary API for command execution - it ensures
+   * the context and working directory are always consistent.
+   */
+  resolveExecution(workspacePath: string, hostAbsolutePath: string): { context: ExecutionContext; executionCwd: string } {
+    const context = this.resolve(workspacePath);
+    const executionCwd = translatorFor(context).toExecutionCwd(workspacePath, hostAbsolutePath, context);
+    return { context, executionCwd };
   }
 
   /** Safe, secret-free summary for logs and the agent prompt. */
@@ -118,17 +130,20 @@ export class ExecutionManager {
 export function buildCommandInvocation(
   context: ExecutionContext,
   command: string,
-  cwd: string,
+  executionCwd: string,
 ): SpawnInvocation {
+  // For WSL backend, use a filtered environment to avoid leaking Windows vars
+  const env = context.backend === "wsl" ? buildWslEnvironment(context.env) : context.env;
+
   if (context.backend === "wsl") {
     const distroArgs = context.wslDistro ? ["-d", context.wslDistro] : [];
     const posixShell = context.shell === "zsh" ? "zsh" : context.shell === "bash" ? "bash" : "sh";
     return {
       file: "wsl.exe",
-      args: [...distroArgs, "--cd", cwd, "--", posixShell, "-lc", command],
+      args: [...distroArgs, "--cd", executionCwd, "--", posixShell, "-lc", command],
       shell: false,
       cwd: undefined,
-      env: context.env,
+      env,
     };
   }
 
@@ -138,8 +153,8 @@ export function buildCommandInvocation(
         file: context.shellPath ?? "powershell.exe",
         args: ["-NoProfile", "-Command", command],
         shell: false,
-        cwd,
-        env: context.env,
+        cwd: executionCwd,
+        env,
       };
     }
     // cmd.exe: mirrors Node's own `shell: true` argument shape on Windows.
@@ -147,8 +162,8 @@ export function buildCommandInvocation(
       file: context.shellPath ?? "cmd.exe",
       args: ["/d", "/s", "/c", command],
       shell: false,
-      cwd,
-      env: context.env,
+      cwd: executionCwd,
+      env,
     };
   }
 
@@ -158,8 +173,8 @@ export function buildCommandInvocation(
     file: posixShell,
     args: ["-c", command],
     shell: false,
-    cwd,
-    env: context.env,
+    cwd: executionCwd,
+    env,
   };
 }
 
@@ -172,23 +187,26 @@ export function buildArgvInvocation(
   context: ExecutionContext,
   command: string,
   args: readonly string[],
-  cwd: string,
+  executionCwd: string,
 ): SpawnInvocation {
+  // For WSL backend, use a filtered environment to avoid leaking Windows vars
+  const env = context.backend === "wsl" ? buildWslEnvironment(context.env) : context.env;
+
   if (context.backend === "wsl") {
     const distroArgs = context.wslDistro ? ["-d", context.wslDistro] : [];
     return {
       file: "wsl.exe",
-      args: [...distroArgs, "--cd", cwd, "--", command, ...args],
+      args: [...distroArgs, "--cd", executionCwd, "--", command, ...args],
       shell: false,
       cwd: undefined,
-      env: context.env,
+      env,
     };
   }
   return {
     file: command,
     args: [...args],
     shell: false,
-    cwd,
-    env: context.env,
+    cwd: executionCwd,
+    env,
   };
 }

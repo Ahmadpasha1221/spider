@@ -19,10 +19,10 @@ describe("path translation is anchored and injection-free", () => {
       for (const workspace of TRICKY_LOCAL_ROOTS) {
         const context = manager.resolve(workspace);
         // Local translation is the identity on the workspace root.
-        expect(context.cwd).toBe(workspace);
+        expect(context.workspaceRoot).toBe(workspace);
 
         const nested = `${workspace}${hostPlatform === "win32" ? "\\" : "/"}src`;
-        const cwd = manager.resolveCwd(workspace, nested);
+        const cwd = manager.resolveExecutionCwd(workspace, nested);
         expect(cwd).toBe(nested);
 
         const invocation = buildCommandInvocation(context, "echo ok", cwd);
@@ -40,18 +40,18 @@ describe("path translation is anchored and injection-free", () => {
       const workspace = `\\\\wsl.localhost\\Ubuntu\\home\\user\\${segment.replaceAll("/", "\\")}`;
       const context = manager.resolve(workspace);
 
-      const shellInvocation = buildCommandInvocation(context, "echo ok", context.cwd);
-      expect(shellInvocation.args.filter((arg) => arg === context.cwd)).toHaveLength(1);
+      const shellInvocation = buildCommandInvocation(context, "echo ok", context.workspaceRoot);
+      expect(shellInvocation.args.filter((arg) => arg === context.workspaceRoot)).toHaveLength(1);
       expect(shellInvocation.args[shellInvocation.args.length - 1]).toBe("echo ok");
       expect(shellInvocation.args[1]).toBe("Ubuntu");
 
       // An argv command keeps both the executable and every argument separate.
-      const argvInvocation = buildArgvInvocation(context, "pnpm", ["run", "test"], context.cwd);
+      const argvInvocation = buildArgvInvocation(context, "pnpm", ["run", "test"], context.workspaceRoot);
       expect(argvInvocation.args).toEqual([
         "-d",
         "Ubuntu",
         "--cd",
-        context.cwd,
+        context.workspaceRoot,
         "--",
         "pnpm",
         "run",
@@ -64,7 +64,7 @@ describe("path translation is anchored and injection-free", () => {
     const manager = new ExecutionManager({ environment: { hostPlatform: "win32" } });
     const workspace = "\\\\wsl.localhost\\Ubuntu\\home\\user\\proj";
     expect(() =>
-      manager.resolveCwd(workspace, "\\\\wsl.localhost\\Ubuntu\\home\\user\\other"),
+      manager.resolveExecutionCwd(workspace, "\\\\wsl.localhost\\Ubuntu\\home\\user\\other"),
     ).toThrow(/outside the workspace execution environment/);
   });
 });

@@ -102,7 +102,7 @@ export async function runTests(
     args,
     cwd: execution.directory,
     ...(context.signal ? { signal: context.signal } : {}),
-    ...(execution.context ? { context: execution.context } : {}),
+    context: execution.context,
   });
   const processId = started.processId;
 
@@ -337,15 +337,17 @@ function resolveExecution(
   manager: ExecutionManager | undefined,
   workspacePath: string,
   hostDirectory: string,
-): { context?: ExecutionContext; directory: string } {
+): { context: ExecutionContext; directory: string } {
   if (!manager) {
-    return { directory: hostDirectory };
+    throw new ToolExecutionError(
+      "dependency_unavailable",
+      "run_tests requires an execution context but no ExecutionManager is available. " +
+      "This is a configuration error — Spider will not fall back to uncontrolled process spawning.",
+    );
   }
   try {
-    return {
-      context: manager.resolve(workspacePath),
-      directory: manager.resolveCwd(workspacePath, hostDirectory),
-    };
+    const { context, executionCwd } = manager.resolveExecution(workspacePath, hostDirectory);
+    return { context, directory: executionCwd };
   } catch (error) {
     if (error instanceof ExecutionContextError) {
       throw new ToolExecutionError("dependency_unavailable", error.message);

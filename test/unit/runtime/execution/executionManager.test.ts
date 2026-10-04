@@ -32,7 +32,7 @@ describe("resolveExecutionContext", () => {
       platform: "windows",
       shell: "cmd",
       backend: "local",
-      cwd: "C:\\projects\\app",
+      workspaceRoot: "C:\\projects\\app",
     });
   });
 
@@ -43,7 +43,7 @@ describe("resolveExecutionContext", () => {
       platform: "linux",
       shell: "bash",
       backend: "local",
-      cwd: "/home/user/project",
+      workspaceRoot: "/home/user/project",
     });
   });
 
@@ -70,7 +70,7 @@ describe("resolveExecutionContext", () => {
       platform: "wsl",
       shell: "bash",
       backend: "local",
-      cwd: "/home/lenovo/frappe15-new-bench",
+      workspaceRoot: "/home/lenovo/frappe15-new-bench",
       wslDistro: "Ubuntu",
     });
   });
@@ -85,7 +85,7 @@ describe("resolveExecutionContext", () => {
       platform: "wsl",
       shell: "bash",
       backend: "wsl",
-      cwd: "/home/lenovo/frappe15-new-bench",
+      workspaceRoot: "/home/lenovo/frappe15-new-bench",
       wslDistro: "Ubuntu",
     });
   });
@@ -96,7 +96,7 @@ describe("resolveExecutionContext", () => {
       "\\\\wsl$\\Ubuntu\\home\\user\\proj",
     );
     expect(context.backend).toBe("wsl");
-    expect(context.cwd).toBe("/home/user/proj");
+    expect(context.workspaceRoot).toBe("/home/user/proj");
     expect(context.wslDistro).toBe("Ubuntu");
   });
 
@@ -109,7 +109,7 @@ describe("resolveExecutionContext", () => {
       executionType: "remote",
       platform: "linux",
       backend: "local",
-      cwd: "/srv/app",
+      workspaceRoot: "/srv/app",
       remoteAuthority: "ssh-remote",
     });
   });
@@ -164,19 +164,19 @@ describe("ExecutionManager", () => {
     });
   });
 
-  it("resolves the workspace cwd for a nested directory", () => {
+  it("resolves the workspace execution cwd for a nested directory", () => {
     const manager = new ExecutionManager({
       environment: environment({ hostPlatform: "win32" }),
     });
     const workspace = "\\\\wsl.localhost\\Ubuntu\\home\\lenovo\\frappe15-new-bench";
-    expect(manager.resolveCwd(workspace, `${workspace}\\sites\\app`)).toBe(
+    expect(manager.resolveExecutionCwd(workspace, `${workspace}\\sites\\app`)).toBe(
       "/home/lenovo/frappe15-new-bench/sites/app",
     );
   });
 
   it("keeps local cwd unchanged", () => {
     const manager = new ExecutionManager({ environment: environment() });
-    expect(manager.resolveCwd("/home/user/project", "/home/user/project/src")).toBe(
+    expect(manager.resolveExecutionCwd("/home/user/project", "/home/user/project/src")).toBe(
       "/home/user/project/src",
     );
   });
@@ -187,7 +187,7 @@ describe("ExecutionManager", () => {
     });
     const summary = manager.describe("/home/user/project");
     expect(summary).toContain("type: local");
-    expect(summary).toContain("cwd: /home/user/project");
+    expect(summary).toContain("workspaceRoot: /home/user/project");
     expect(summary).not.toContain("leak-me");
     expect(summary).not.toContain("API_KEY");
   });
@@ -256,9 +256,9 @@ describe("buildCommandInvocation", () => {
       environment({ hostPlatform: "win32" }),
       "\\\\wsl.localhost\\Ubuntu\\home\\user\\my project & (bench) $HOME",
     );
-    const invocation = buildCommandInvocation(context, "echo ok", context.cwd);
+    const invocation = buildCommandInvocation(context, "echo ok", context.workspaceRoot);
     // The cwd stays a single argv entry; it is never interpolated into `command`.
-    expect(invocation.args).toContain(context.cwd);
+    expect(invocation.args).toContain(context.workspaceRoot);
     expect(invocation.args[invocation.args.length - 1]).toBe("echo ok");
   });
 });
@@ -306,7 +306,7 @@ describe("CommandRunner execution-context path", () => {
 
     const result = await runWorkspaceCommand({
       command: "bench migrate",
-      cwd: context.cwd,
+      cwd: context.workspaceRoot,
       context,
       spawnFn: fakeSpawn(recorded) as unknown as typeof spawn,
       onOutput: (_stream, chunk) => chunks.push(chunk),

@@ -157,6 +157,10 @@ export class MessageRouter {
         // Handled by the webview host (it owns the editor panel); kept in the
         // exhaustive switch so a direct call is a documented no-op.
         return { success: true };
+      case "OPEN_URL":
+        // Handled by the webview host (it owns external URL opening); kept
+        // in the exhaustive switch so a direct call is a documented no-op.
+        return { success: true };
       case "DELETE_SESSION": {
         // History Delete: cancel any run, drop the session and erase its
         // transcript so it cannot reappear in the list after a restart.
@@ -740,6 +744,11 @@ export class MessageRouter {
       case "OPEN_FILE":
         if (typeof typed.path !== "string") {
           throw new Error("Invalid OPEN_FILE message");
+        }
+        return message as WebviewMessage;
+      case "OPEN_URL":
+        if (typeof typed.url !== "string") {
+          throw new Error("Invalid OPEN_URL message");
         }
         return message as WebviewMessage;
       case "OPEN_DIFF":

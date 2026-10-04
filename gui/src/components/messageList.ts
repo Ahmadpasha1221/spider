@@ -1,6 +1,7 @@
 import type { FileChangeView } from "../protocol";
 import type { ChatLine } from "../state";
 import { createStreamCoalescer } from "../streamCoalescer";
+import { renderMarkdownInto } from "./markdown";
 
 type MessageListHandlers = {
   onAllowPermission?: (requestId: string) => void;
@@ -9,6 +10,8 @@ type MessageListHandlers = {
   onAcceptChange?: (changeId: string) => void;
   onRejectChange?: (changeId: string) => void;
   onOpenArtifact?: (path: string) => void;
+  /** Markdown link click: the host opens it externally (http/https only). */
+  onOpenUrl?: (url: string) => void;
   /** Message Delete: removes it from the UI and conversation persistence. */
   onDeleteMessage?: (messageId: string) => void;
   /** Empty-state suggestion chip: fills the composer with a starter prompt. */
@@ -69,10 +72,32 @@ export interface MessageListHandle {
 export function createMessageList(root: HTMLElement, initialHandlers?: MessageListHandlers): MessageListHandle {
   let currentHandlers: MessageListHandlers = initialHandlers ?? {};
 
+  // Markdown links are intercepted here (delegation, so links
+  // re-created on every streaming frame keep working): the host
+  // decides whether the URL may be opened. Anchors never navigate
+  // the webview itself.
+  root.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const anchor = target.closest("a");
+    if (anchor) {
+      event.preventDefault();
+      event.stopPropagation();
+      currentHandlers.onOpenUrl?.(anchor.getAttribute("href") ?? "");
+    }
+  });
+
   const itemByToolCallId = new Map<string, HTMLElement>();
   const artifactByChangeId = new Map<string, HTMLElement>();
   let streamingLine: HTMLElement | undefined;
-  let streamingBody: Text | undefined;
+  /**
+   * The streaming line's message body. Markdown is re-rendered into
+   * it (at most once per animation frame by the coalescer), so the
+   * accumulator below stays the single source of truth for content.
+   */
+  let streamingBody: HTMLDivElement | undefined;
   let thinkingBlock: HTMLElement | undefined;
   let thinkingBody: HTMLElement | undefined;
   let scrollScheduled = false;
@@ -141,7 +166,13 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
     meta.textContent = labelFor(message);
     const body = document.createElement("div");
     body.className = "message-body";
-    body.textContent = bodyText(message);
+    if (message.role === "agent") {
+      // Assistant output is Markdown; user/system/tool text stays
+      // plain (it is usually written as notes, not formatted).
+      renderMarkdownInto(body, message.text);
+    } else {
+      body.textContent = bodyText(message);
+    }
     article.append(meta, body);
     return { article, body };
   }
@@ -354,13 +385,12 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
     const meta = document.createElement("span");
     meta.className = "message-meta";
     meta.textContent = "Spider";
-    streamingBody = document.createTextNode("");
     const body = document.createElement("div");
     body.className = "message-body";
-    body.appendChild(streamingBody);
     article.append(meta, body);
     root.appendChild(article);
     streamingLine = article;
+    streamingBody = body;
     streamText = "";
     const empty = root.querySelector<HTMLElement>(".empty-chat");
     if (empty) {
@@ -369,16 +399,18 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
   }
 
   /**
-   * Frame paint: appends the chunks accumulated since the previous frame to the
-   * streaming line's text node. No DOM rebuild, no sibling reflow — then a
-   * sticky-bottom scroll check on the same frame.
+   * Frame paint: the coalescer releases accumulated chunks at
+   * most once per animation frame and the full accumulator is
+   * re-rendered as Markdown. Incomplete fences/lists/tables
+   * degrade gracefully (an unterminated fence renders as a
+   * code block to end-of-stream) — no partial-DOM bookkeeping.
    */
-  function paintStreamText(text: string): void {
+  function paintStreamText(_text: string): void {
     if (!streamingLine || !streamingLine.isConnected) {
       ensureStreamingLine();
     }
-    if (streamingBody && text.length > 0) {
-      streamingBody.textContent += text;
+    if (streamingBody && streamText.length > 0) {
+      renderMarkdownInto(streamingBody, streamText);
       scheduleScroll();
     }
   }
@@ -470,11 +502,11 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
         } else {
           streamingLine.classList.remove("streaming-line");
           if (finalText.length > 0) {
-            const body = streamingLine.querySelector(".message-body");
+            const body = streamingLine.querySelector<HTMLDivElement>(".message-body");
             if (body) {
               // The finalized model message replaces the accumulated stream
               // text exactly once — same source, no duplication possible.
-              body.textContent = finalText;
+              renderMarkdownInto(body, finalText);
             }
           }
           attachMessageActions(streamingLine, {

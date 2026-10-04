@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { ExecutionContext } from "../execution/executionTypes";
+import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
 import { buildCommandInvocation } from "../execution/executionManager";
 
 export interface CommandRunResult {
@@ -25,12 +25,19 @@ export interface RunCommandOptions {
    */
   readonly onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
   /**
-   * Resolved execution context. When present, the process is launched through
-   * the context's backend (local shell / WSL bridge) with an argv array. When
-   * absent, the legacy `shell: true` behavior is preserved for callers that do
-   * not go through the ExecutionManager.
+   * Resolved execution context. REQUIRED.
+   *
+   * Every command execution must carry a validated ExecutionContext produced by
+   * ExecutionManager.resolve(). This ensures that:
+   *   - The command is launched through the correct backend (local / WSL / remote).
+   *   - Process creation is always argv-only (shell: false), never a shell string.
+   *   - No missing-context path can silently downgrade to shell: true.
+   *
+   * Security invariant: if context is absent, execution FAILS CLOSED with an
+   * ExecutionContextError. A missing context is treated as a security failure,
+   * not as a reason to use a legacy shell fallback.
    */
-  readonly context?: ExecutionContext;
+  readonly context: ExecutionContext;
   /** Injectable spawn (tests / alternative hosts). */
   readonly spawnFn?: typeof spawn;
 }
@@ -39,6 +46,18 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 200_000;
 
 export function runWorkspaceCommand(options: RunCommandOptions): Promise<CommandRunResult> {
+  // Security invariant: context must be a valid ExecutionContext object.
+  // We validate this at runtime in addition to the TypeScript type, because
+  // callers can arrive through JavaScript, tests with cast types, or
+  // configuration paths that bypass strict checking.
+  if (!options.context || typeof options.context !== "object") {
+    throw new ExecutionContextError(
+      "Execution context is required before running commands. " +
+      "A missing or invalid ExecutionContext is treated as a security failure — " +
+      "Spider will not fall back to shell: true.",
+    );
+  }
+
   const timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
 
   return new Promise((resolve, reject) => {
@@ -48,13 +67,7 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
     }
 
     const spawnFn = options.spawnFn ?? spawn;
-    const child = options.context
-      ? spawnWithContext(spawnFn, options.context, options.command, options.cwd)
-      : spawnFn(options.command, {
-          cwd: options.cwd,
-          shell: true,
-          windowsHide: true,
-        });
+    const child = spawnWithContext(spawnFn, options.context, options.command, options.cwd);
 
     let stdout = "";
     let stderr = "";
@@ -114,9 +127,9 @@ function spawnWithContext(
   spawnFn: typeof spawn,
   context: ExecutionContext,
   command: string,
-  cwd: string,
+  executionCwd: string,
 ): ReturnType<typeof spawn> {
-  const invocation = buildCommandInvocation(context, command, cwd);
+  const invocation = buildCommandInvocation(context, command, executionCwd);
   return spawnFn(invocation.file, [...invocation.args], {
     ...(invocation.cwd !== undefined ? { cwd: invocation.cwd } : {}),
     env: invocation.env,

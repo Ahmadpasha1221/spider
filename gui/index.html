@@ -25,6 +25,13 @@
         Cursor
       </div>
 
+      <button id="session-btn" class="session-btn" type="button" title="Switch conversation" aria-haspopup="listbox" aria-expanded="false">
+        <span id="session-btn-title">New conversation</span>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5 6 7.5 9 4.5"/></svg>
+      </button>
+
+      <div id="session-menu" class="session-menu" role="listbox" hidden></div>
+
       <div class="header-actions">
 
         <button id="history-btn" class="icon-btn" type="button" aria-label="Open conversation history" title="History">
