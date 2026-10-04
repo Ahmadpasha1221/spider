@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import type { ExecutionContext } from "../execution/executionTypes";
+import { buildArgvInvocation } from "../execution/executionManager";
 
 /**
  * Managed background processes.
@@ -56,6 +58,12 @@ export interface BackgroundProcessStartRequest {
    * terminates a process that already spawned.
    */
   readonly signal?: AbortSignal;
+  /**
+   * Resolved execution context. When present, the process is launched through
+   * the context's backend (local shell environment or the WSL bridge) instead
+   * of the extension host's default environment.
+   */
+  readonly context?: ExecutionContext;
 }
 
 export interface BackgroundProcessStartResult extends BackgroundProcessInfo {
@@ -171,10 +179,18 @@ export class BackgroundProcessManager {
       return this.toStartResult(record, { cancelled: true });
     }
 
+    // The ExecutionManager decides WHERE the process runs. With a context the
+    // launch is backend-aware (e.g. bridged into a WSL distro); the record still
+    // reports the caller's command/args, so output identity is unchanged.
+    const invocation = request.context
+      ? buildArgvInvocation(request.context, request.command, args, request.cwd)
+      : { file: request.command, args, cwd: request.cwd as string | undefined, env: undefined };
+
     let child: ChildProcess;
     try {
-      child = this.spawnFn(request.command, args, {
-        cwd: request.cwd,
+      child = this.spawnFn(invocation.file, [...invocation.args], {
+        ...(invocation.cwd !== undefined ? { cwd: invocation.cwd } : {}),
+        ...(invocation.env !== undefined ? { env: invocation.env } : {}),
         shell: false,
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],

@@ -308,7 +308,9 @@ fallback contract. `isLocalToolName` is the membership test.
 - `backgroundProcessManager.ts` (Phase 2) — the managed background-process
   registry (in-memory only, bounded rolling per-stream buffers, retained-
   process cap). `background_command` starts an argv-only process
-  (`shell: false`, `windowsHide: true`); **the tool request is decoupled from
+  (`shell: false`, `windowsHide: true`); when a resolved `context` is passed the
+  launch is backend-aware (WSL bridge) while the record keeps the caller's
+  command/args; **the tool request is decoupled from
   the process lifetime** — cancelling an agent run stops waiting for startup
   but never kills a process that already started. Only `stop()`/`dispose()`/
   `shutdown()` end processes, and a persistent `error` listener records late
@@ -402,9 +404,15 @@ workspace path never tells us which OS/shell/environment commands run in.
   secret-free summary).
 - `executionManager.ts` — `ExecutionManager`: resolves + caches the context per
   workspace, `invalidate()`/`updateEnvironment()` on workspace or shell change,
-  `resolveCwd(workspace, hostPath)` path translation, `describe(workspace)` for
-  the agent prompt, and `buildCommandInvocation(context, command, cwd)` which
-  produces an **argv-only** launch (`shell: false`) for each backend.
+  `resolveCwd(workspace, hostPath)` path translation (delegated to a
+  `WorkspacePathTranslator`), `describe(workspace)` for the agent prompt,
+  `buildCommandInvocation(context, command, cwd)` for shell-string commands and
+  `buildArgvInvocation(context, command, args, cwd)` for argv commands — both
+  produce an **argv-only** launch (`shell: false`) for each backend.
+- `pathTranslator.ts` — the `WorkspacePathTranslator` seam (`localPathTranslator`
+  identity, `wslUncPathTranslator` re-roots a UNC path onto the Linux side and
+  rejects escapes). Container/remote mappings can be added here without
+  touching the manager.
 
 Resolution precedence (VS Code facts only — never `wsl --list`, `which`,
 `find`, `pwd` probing):
@@ -433,6 +441,14 @@ PowerShell uses `-NoProfile -Command`; POSIX uses `<shell> -c`.
 environment or prefixes `wsl.exe`/`cmd.exe`/`bash.exe`.
 An unresolvable context throws `ExecutionContextError`, mapped by the executor
 to `dependency_unavailable` — never a silent fallback to another shell.
+`background_command` and `run_tests` resolve through the same manager
+(`BackgroundProcessStartRequest.context`): their argv launches are bridged with
+`buildArgvInvocation` (e.g. `wsl.exe -d <distro> --cd <cwd> -- <exe> <args>`)
+while the process record still reports the caller's command/args.
+Optional explicit overrides `spider.execution.shell` and
+`spider.execution.wslDistro` (VS Code settings) populate
+`ExecutionEnvironment.configuredShell`/`configuredWslDistro`; a read-only
+summary appears in Settings → About (`ExtensionInfoView.executionContext`).
 The 120 ms `command_output` coalescing, permissions, cancellation, timeouts and
 stdout/stderr streaming are unchanged: only the resolved launch is new.
 
@@ -1289,6 +1305,16 @@ compress content). Section state: `AppState.settingsSection`.
   injected into the agent prompt; the 120 ms streaming, permissions, timeout
   and cancellation paths are unchanged. 735 unit tests (24 new execution
   tests), lint 0 warnings, typecheck + compile green.
+- **Completed (2026-10-04, execution-environment follow-ups):**
+  `background_command` and `run_tests` now resolve through the same
+  `ExecutionManager` (argv launch bridged to WSL when needed); a
+  `WorkspacePathTranslator` seam replaces the inline translation and adds the
+  container/remote extension point; new tests cover the full
+  `ToolRouter → executor → context → runner` chain, the system-prompt summary,
+  and fuzz paths/argv for spaces/special characters/escapes; optional
+  `spider.execution.shell` / `spider.execution.wslDistro` overrides and a
+  read-only Settings → About execution row were added. 744 unit tests (88
+  files), lint 0 warnings, typecheck + compile green.
 - **Completed (2026-09-25/26):** OpenAI-compatible tool-call id lifecycle +
   regression tests; provider config persistence (+ restore at activation);
   dedicated History page + "History" terminology; Spider rebrand (display

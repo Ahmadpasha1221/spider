@@ -102,6 +102,16 @@
           "type": "boolean",
           "default": false,
           "description": "Automatically apply edits from the agent."
+        },
+        "spider.execution.shell": {
+          "type": "string",
+          "default": "",
+          "description": "Override the shell Spider uses to run commands. One of powershell, cmd, bash, zsh, sh. Empty auto-detects from the VS Code integrated terminal shell and the workspace environment."
+        },
+        "spider.execution.wslDistro": {
+          "type": "string",
+          "default": "",
+          "description": "Override the WSL distro Spider runs commands in when the workspace is inside WSL. Empty uses the distro reported by VS Code / the workspace path."
         }
       }
     },

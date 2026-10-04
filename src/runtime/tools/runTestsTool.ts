@@ -1,4 +1,6 @@
 import * as path from "node:path";
+import type { ExecutionManager } from "../execution/executionManager";
+import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
 import { pathExists, resolveWorkspacePathSafe } from "./workspacePath";
 import { ToolExecutionError } from "./toolError";
 import {
@@ -58,6 +60,8 @@ export interface RunTestsToolContext {
 
 export interface RunTestsToolDeps {
   readonly backgroundProcesses: BackgroundProcessManager;
+  /** Resolves the real execution environment (WSL/remote) for the runner. */
+  readonly executionManager?: ExecutionManager;
 }
 
 export async function runTests(
@@ -74,11 +78,16 @@ export async function runTests(
     throw new ToolExecutionError("cancelled", "Tool execution was cancelled.");
   }
 
+  // Resolve WHERE the runner executes (local / WSL / remote) through the single
+  // authoritative manager; the runner then starts in that environment.
+  const execution = resolveExecution(deps.executionManager, context.workspacePath, cwd);
+
   const started = await deps.backgroundProcesses.start({
     command: runner,
     args,
-    cwd,
+    cwd: execution.directory,
     ...(context.signal ? { signal: context.signal } : {}),
+    ...(execution.context ? { context: execution.context } : {}),
   });
   const processId = started.processId;
 
@@ -193,6 +202,27 @@ export function parseTimeout(value: unknown): number {
     throw new ToolExecutionError("invalid_input", "timeoutMs must be at least 1000.");
   }
   return Math.min(floored, TEST_RUN_LIMITS.maxTimeoutMs);
+}
+
+function resolveExecution(
+  manager: ExecutionManager | undefined,
+  workspacePath: string,
+  hostDirectory: string,
+): { context?: ExecutionContext; directory: string } {
+  if (!manager) {
+    return { directory: hostDirectory };
+  }
+  try {
+    return {
+      context: manager.resolve(workspacePath),
+      directory: manager.resolveCwd(workspacePath, hostDirectory),
+    };
+  } catch (error) {
+    if (error instanceof ExecutionContextError) {
+      throw new ToolExecutionError("dependency_unavailable", error.message);
+    }
+    throw error;
+  }
 }
 
 function capOutput(text: string): { text: string; truncated: boolean } {

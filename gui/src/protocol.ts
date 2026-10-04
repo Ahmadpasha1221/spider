@@ -88,6 +88,8 @@ export interface ExtensionInfoView {
   repositoryUrl?: string;
   activeProvider?: string;
   activeModelId?: string;
+  /** Safe, secret-free execution-environment summary (type/platform/shell/cwd). */
+  executionContext?: string;
 }
 
 export interface FileChangeView {

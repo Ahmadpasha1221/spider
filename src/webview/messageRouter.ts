@@ -238,7 +238,8 @@ export class MessageRouter {
         const snapshot = this.permissionManager.setPermissionRule(typed.category, typed.rule);
         return { type: "PERMISSION_RULES", rules: { ...snapshot.rules } };
       }
-      case "GET_EXTENSION_INFO":
+      case "GET_EXTENSION_INFO": {
+        const executionContext = this.runtimeManager?.describeExecution(this.defaultWorkspacePath);
         return {
           type: "EXTENSION_INFO",
           info: {
@@ -251,8 +252,10 @@ export class MessageRouter {
             ...(this.runtimeManager?.getProviderConfig()?.modelId
               ? { activeModelId: this.runtimeManager.getProviderConfig()?.modelId }
               : {}),
+            ...(executionContext ? { executionContext } : {}),
           },
         } as ExtensionMessage;
+      }
       case "CONNECT_CURSOR": {
         if (!this.connection) {
           return { success: true };

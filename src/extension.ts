@@ -25,7 +25,7 @@ import { OpenAICompatibleRuntime } from "./runtime/openaiCompatible/openaiCompat
 import { OpenRouterRuntime } from "./runtime/openrouter/openRouterRuntime";
 import { WorkspaceToolExecutor } from "./runtime/tools/workspaceToolExecutor";
 import { ExecutionManager } from "./runtime/execution/executionManager";
-import type { ExecutionEnvironment } from "./runtime/execution/executionTypes";
+import type { ExecutionEnvironment, ExecutionShell } from "./runtime/execution/executionTypes";
 import { createVSCodeDiagnosticsSource } from "./runtime/diagnostics/diagnosticsSource";
 import { createVSCodeEditorContextSource } from "./runtime/editor/editorContextSource";
 import { createVSCodeLanguageSource } from "./runtime/lsp/languageSource";
@@ -97,12 +97,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Authoritative command-execution environment. Captured from VS Code (never
   // from shell probing) so run_command runs in the same environment as the
   // workspace's integrated terminal, including WSL and remote workspaces.
-  const createExecutionEnvironment = (): ExecutionEnvironment => ({
-    hostPlatform: process.platform,
-    ...(vscode.env.remoteName ? { remoteName: vscode.env.remoteName } : {}),
-    terminalShellPath: vscode.env.shell,
-    env: process.env,
-  });
+  const createExecutionEnvironment = (): ExecutionEnvironment => {
+    const config = vscode.workspace.getConfiguration("spider");
+    const configuredShell = executionShellOverride(config.get<string>("execution.shell"));
+    const configuredWslDistro = nonEmpty(config.get<string>("execution.wslDistro"));
+    return {
+      hostPlatform: process.platform,
+      ...(vscode.env.remoteName ? { remoteName: vscode.env.remoteName } : {}),
+      terminalShellPath: vscode.env.shell,
+      env: process.env,
+      ...(configuredShell ? { configuredShell } : {}),
+      ...(configuredWslDistro ? { configuredWslDistro } : {}),
+    };
+  };
   const executionManager = new ExecutionManager({
     environment: createExecutionEnvironment(),
     logger: { info: (message, logContext) => logger.info(message, logContext ?? {}) },
@@ -135,7 +142,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(() => executionManager.invalidate()),
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (event.affectsConfiguration("terminal.integrated")) {
+      if (event.affectsConfiguration("terminal.integrated") || event.affectsConfiguration("spider.execution")) {
         executionManager.updateEnvironment(createExecutionEnvironment());
       }
     }),
@@ -288,6 +295,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   logger.info("Extension activated", { operation: "activate" });
+}
+
+function executionShellOverride(value: string | undefined): ExecutionShell | undefined {
+  switch (value) {
+    case "powershell":
+    case "cmd":
+    case "bash":
+    case "zsh":
+    case "sh":
+      return value;
+    default:
+      return undefined;
+  }
+}
+
+function nonEmpty(value: string | undefined): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
 export function deactivate(): void {

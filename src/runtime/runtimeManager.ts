@@ -705,6 +705,15 @@ export class RuntimeManager implements vscode.Disposable {
     await this.startTask(sessionId, prompt, cancellationToken, true);
   }
 
+  /**
+   * Safe, secret-free execution-environment summary for the active workspace.
+   * Used by the agent prompt and by Settings → About (read-only).
+   */
+  describeExecution(workspacePath?: string): string | undefined {
+    const target = workspacePath ?? this.options.defaultWorkspacePath ?? ".";
+    return this.options.executionManager?.describe(target);
+  }
+
   resolvePermission(requestId: string, decision: "ALLOW" | "DENY"): void {
     this.options.permissionManager.resolveDecision({
       requestId,
