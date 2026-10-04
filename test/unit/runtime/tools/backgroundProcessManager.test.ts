@@ -7,6 +7,8 @@ import {
   MAX_PROCESS_BUFFER_CHARS,
   type BackgroundProcessManagerOptions,
 } from "../../../../src/runtime/tools/backgroundProcessManager";
+import { ExecutionManager } from "../../../../src/runtime/execution/executionManager";
+import type { ExecutionContext } from "../../../../src/runtime/execution/executionTypes";
 
 type SpawnFn = NonNullable<BackgroundProcessManagerOptions["spawnFn"]>;
 
@@ -55,7 +57,29 @@ function makeManager(spawn: FakeSpawn, options: Partial<BackgroundProcessManager
   });
 }
 
+/**
+ * Builds a minimal local ExecutionContext for the current platform.
+ * Used to satisfy the security-mandatory context requirement in tests.
+ */
+function makeLocalContext(): ExecutionContext {
+  const cwd = process.platform === "win32" ? "C:\\workspace" : "/workspace";
+  const manager = new ExecutionManager({
+    environment: {
+      hostPlatform: process.platform,
+      terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+      ) as Record<string, string>,
+    },
+  });
+  return manager.resolve(cwd);
+}
+
 const CWD = "/workspace";
+// A context that satisfies the security invariant. The fake spawn never
+// actually reads the context values; the manager uses it to build the
+// invocation, which the fake spawn records but does not execute.
+const LOCAL_CONTEXT = makeLocalContext();
 
 describe("isTerminal", () => {
   it("classifies every terminal status", () => {
@@ -73,7 +97,7 @@ describe("BackgroundProcessManager.start", () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn);
 
-    const result = await manager.start({ command: "pnpm", args: ["run", "dev"], cwd: CWD });
+    const result = await manager.start({ command: "pnpm", args: ["run", "dev"], cwd: CWD, context: LOCAL_CONTEXT });
 
     expect(result.status).toBe("running");
     expect(result.pid).toBe(4242);
@@ -89,14 +113,14 @@ describe("BackgroundProcessManager.start", () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn);
 
-    await manager.start({ command: "npm", args: ["run", "build", "--", "--watch"], cwd: CWD });
+    await manager.start({ command: "npm", args: ["run", "build", "--", "--watch"], cwd: CWD, context: LOCAL_CONTEXT });
     expect(spawn.calls[0]?.args).toEqual(["run", "build", "--", "--watch"]);
   });
 
   it("buffers stdout and stderr and reports totals", async () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn);
-    const started = await manager.start({ command: "node", cwd: CWD });
+    const started = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
 
     spawn.latest().stdout.emit("data", "hello ");
     spawn.latest().stderr.emit("data", "oops");
@@ -110,7 +134,7 @@ describe("BackgroundProcessManager.start", () => {
   it("bounds the retained buffer and reports truncation and totals", async () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn, { maxBufferChars: 5 });
-    const started = await manager.start({ command: "node", cwd: CWD });
+    const started = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
 
     spawn.latest().stdout.emit("data", "0123456789");
 
@@ -124,11 +148,11 @@ describe("BackgroundProcessManager.start", () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn);
 
-    const ok = await manager.start({ command: "node", cwd: CWD });
+    const ok = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
     spawn.latest().emit("close", 0);
     expect(manager.get(ok.processId)).toMatchObject({ status: "exited", exitCode: 0 });
 
-    const bad = await manager.start({ command: "node", cwd: CWD });
+    const bad = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
     spawn.latest().emit("close", 2);
     expect(manager.get(bad.processId)).toMatchObject({ status: "failed", exitCode: 2 });
   });
@@ -140,7 +164,7 @@ describe("BackgroundProcessManager.start", () => {
     });
     const manager = makeManager(spawn, { immediateExitGraceMs: 20 });
 
-    const result = await manager.start({ command: "node", cwd: CWD });
+    const result = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
     expect(result.status).toBe("exited");
     expect(result.exitCode).toBe(0);
   });
@@ -151,7 +175,7 @@ describe("BackgroundProcessManager.start", () => {
     }) as unknown as SpawnFn;
     const manager = new BackgroundProcessManager({ spawnFn, immediateExitGraceMs: 0 });
 
-    const result = await manager.start({ command: "definitely-missing", cwd: CWD });
+    const result = await manager.start({ command: "definitely-missing", cwd: CWD, context: LOCAL_CONTEXT });
     expect(result.status).toBe("failed");
     expect(result.error).toContain("ENOENT");
   });
@@ -162,7 +186,7 @@ describe("BackgroundProcessManager.start", () => {
     });
     const manager = makeManager(spawn);
 
-    const result = await manager.start({ command: "missing", cwd: CWD });
+    const result = await manager.start({ command: "missing", cwd: CWD, context: LOCAL_CONTEXT });
     expect(result.status).toBe("failed");
     expect(result.error).toContain("ENOENT");
   });
@@ -173,7 +197,7 @@ describe("BackgroundProcessManager.start", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const result = await manager.start({ command: "node", cwd: CWD, signal: controller.signal });
+    const result = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT, signal: controller.signal });
     expect(result.cancelled).toBe(true);
     expect(result.status).toBe("cancelled");
     expect(spawn.calls).toHaveLength(0);
@@ -184,7 +208,7 @@ describe("BackgroundProcessManager.start", () => {
     const manager = makeManager(spawn);
     const controller = new AbortController();
 
-    const pending = manager.start({ command: "node", cwd: CWD, signal: controller.signal });
+    const pending = manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT, signal: controller.signal });
     controller.abort();
     const result = await pending;
 
@@ -197,8 +221,8 @@ describe("BackgroundProcessManager.start", () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn, { idFactory: () => "fixed" });
 
-    const first = await manager.start({ command: "node", cwd: CWD });
-    const second = await manager.start({ command: "node", cwd: CWD });
+    const first = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
+    const second = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
     expect(first.processId).toBe("fixed");
     expect(second.processId).toBe("fixed-2");
   });
@@ -208,7 +232,7 @@ describe("BackgroundProcessManager.stop / dispose", () => {
   it("marks a running process killed and keeps its identity", async () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn);
-    const started = await manager.start({ command: "node", cwd: CWD });
+    const started = await manager.start({ command: "node", cwd: CWD, context: LOCAL_CONTEXT });
 
     const stopped = await manager.stop(started.processId, { force: true });
     expect(stopped?.status).toBe("killed");
@@ -226,8 +250,8 @@ describe("BackgroundProcessManager.stop / dispose", () => {
   it("stops every process and clears the registry on shutdown", async () => {
     const spawn = makeFakeSpawn(spawnThen);
     const manager = makeManager(spawn);
-    await manager.start({ command: "a", cwd: CWD });
-    await manager.start({ command: "b", cwd: CWD });
+    await manager.start({ command: "a", cwd: CWD, context: LOCAL_CONTEXT });
+    await manager.start({ command: "b", cwd: CWD, context: LOCAL_CONTEXT });
 
     await manager.shutdown();
     expect(manager.list()).toEqual([]);
@@ -238,7 +262,7 @@ describe("BackgroundProcessManager.stop / dispose", () => {
     const manager = makeManager(spawn, { maxRetainedProcesses: 2, killGraceMs: 5 });
 
     for (let index = 0; index < 5; index += 1) {
-      await manager.start({ command: `p${index}`, cwd: CWD });
+      await manager.start({ command: `p${index}`, cwd: CWD, context: LOCAL_CONTEXT });
       spawn.latest().emit("close", 0);
     }
 

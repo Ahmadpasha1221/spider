@@ -103,7 +103,7 @@ export async function runInferenceAgentLoop(
   const allowedTools = availableToolNames(mode);
 
   prepareHistory(history, request.retry === true);
-  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools, request.executionContextSummary);
+  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools, request.executionContextSummary, request.rulesContext);
   history.push({ role: "user", content: request.prompt });
   await emit({ type: "status", sessionId: request.sessionId, status: "RUNNING", timestamp: Date.now() });
 
@@ -331,8 +331,9 @@ function ensureSystemPrompt(
   nativeTools: boolean,
   allowedTools: readonly string[],
   executionContextSummary?: string,
+  rulesContext?: string,
 ): void {
-  const base = buildAgentSystemPrompt(modelId, executionContextSummary);
+  const base = buildAgentSystemPrompt(modelId, executionContextSummary, rulesContext);
   const prompt = nativeTools ? base : `${base}\n\n${buildFallbackToolContract(allowedTools)}`;
   const existing = history.find((turn) => turn.role === "system");
   if (!existing) {

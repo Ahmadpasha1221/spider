@@ -3,6 +3,8 @@ import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { BackgroundProcessManager, type BackgroundProcessManagerOptions } from "../../../../src/runtime/tools/backgroundProcessManager";
 import { getCommandOutput, killCommand, OUTPUT_LIMITS } from "../../../../src/runtime/tools/processTools";
+import { ExecutionManager } from "../../../../src/runtime/execution/executionManager";
+import type { ExecutionContext } from "../../../../src/runtime/execution/executionTypes";
 
 type SpawnFn = NonNullable<BackgroundProcessManagerOptions["spawnFn"]>;
 
@@ -25,8 +27,26 @@ function makeManager(): { manager: BackgroundProcessManager; latest: () => FakeC
   return { manager, latest: () => children[children.length - 1] as FakeChild };
 }
 
+/** Minimal local context for the current platform (satisfies the security invariant). */
+function makeLocalContext(cwd?: string): ExecutionContext {
+  const resolvedCwd = cwd ?? (process.platform === "win32" ? "C:\\workspace" : "/workspace");
+  const manager = new ExecutionManager({
+    environment: {
+      hostPlatform: process.platform,
+      terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+      ) as Record<string, string>,
+    },
+  });
+  return manager.resolve(resolvedCwd);
+}
+
+const CWD = process.platform === "win32" ? "C:\\workspace" : "/workspace";
+const LOCAL_CONTEXT = makeLocalContext();
+
 async function startRunning(manager: BackgroundProcessManager, latest: () => FakeChild) {
-  const started = await manager.start({ command: "npm", args: ["run", "dev"], cwd: "/w" });
+  const started = await manager.start({ command: "npm", args: ["run", "dev"], cwd: CWD, context: LOCAL_CONTEXT });
   return { started, child: latest() };
 }
 

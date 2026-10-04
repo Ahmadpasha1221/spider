@@ -33,11 +33,73 @@ const listRoot = mustEl("history-list");
 const emptyState = mustEl("history-empty");
 const previewBody = mustEl("history-preview-body");
 const previewEmpty = mustEl("history-preview-empty");
+const filterInput = mustEl("history-filter") as HTMLInputElement;
 
 let activeSessionId: string | undefined;
 /** Conversation whose transcript is shown in the preview pane. */
 let previewSessionId: string | undefined;
 const statusBySession = new Map<string, string>();
+/** Last host-broadcast list; the filter re-renders from it. */
+let lastSessions: readonly SessionListItem[] = [];
+/** Lowercase filter text; empty shows everything. */
+let filterText = "";
+
+filterInput.addEventListener("input", () => {
+  filterText = filterInput.value.trim().toLowerCase();
+  render(lastSessions);
+});
+
+/** Case-insensitive match against the fields a user would search. */
+function matchesFilter(session: SessionListItem, filter: string): boolean {
+  if (!filter) {
+    return true;
+  }
+  const haystack = [
+    session.currentTask ?? "",
+    session.sessionId,
+    basename(session.workspacePath),
+    session.status.toLowerCase(),
+  ].join(" ").toLowerCase();
+  return haystack.includes(filter);
+}
+
+/**
+ * Two-click delete confirmation (webviews block window.confirm,
+ * so an arm-to-confirm pattern is used instead): the first
+ * click arms the row's button ("Confirm?"), the second click
+ * within the window performs the deletion. Any list rebuild
+ * disarms — a refreshed list must never delete silently.
+ */
+let armedDeleteId: string | undefined;
+let armTimeout: ReturnType<typeof setTimeout> | undefined;
+
+function disarmDelete(button?: HTMLButtonElement): void {
+  if (armTimeout !== undefined) {
+    clearTimeout(armTimeout);
+    armTimeout = undefined;
+  }
+  armedDeleteId = undefined;
+  if (button) {
+    button.textContent = "Delete";
+    button.classList.remove("is-armed");
+  }
+}
+
+function deleteConversation(sessionId: string, button: HTMLButtonElement): void {
+  if (armedDeleteId !== sessionId) {
+    armedDeleteId = sessionId;
+    button.textContent = "Confirm?";
+    button.classList.add("is-armed");
+    armTimeout = setTimeout(() => disarmDelete(button), 2500);
+    return;
+  }
+  disarmDelete(button);
+  if (previewSessionId === sessionId) {
+    previewSessionId = undefined;
+    renderPreview(undefined, []);
+  }
+  postToHost({ type: "DELETE_SESSION", sessionId });
+}
 
 function render(sessions: readonly SessionListItem[]): void {
   const sorted = [...sessions].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
@@ -48,9 +110,15 @@ function render(sessions: readonly SessionListItem[]): void {
     renderPreview(undefined, []);
   }
 
-  const rows = sorted.map(renderRow);
+  const visible = filterText ? sorted.filter((session) => matchesFilter(session, filterText)) : sorted;
+  const rows = visible.map(renderRow);
   listRoot.replaceChildren(...rows);
   emptyState.hidden = rows.length > 0;
+  if (rows.length === 0) {
+    emptyState.textContent = sorted.length === 0
+      ? "No conversations yet. Start one from the Spider sidebar."
+      : `No conversations match “${filterText}”.`;
+  }
 }
 
 function renderRow(session: SessionListItem): HTMLElement {
@@ -87,12 +155,13 @@ function renderRow(session: SessionListItem): HTMLElement {
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "history-row-delete";
-  remove.textContent = "Delete";
+  remove.textContent = armedDeleteId === session.sessionId ? "Confirm?" : "Delete";
+  remove.classList.toggle("is-armed", armedDeleteId === session.sessionId);
   remove.title = "Delete this conversation and its transcript";
   remove.setAttribute("aria-label", `Delete conversation: ${session.currentTask ?? session.sessionId}`);
   remove.addEventListener("click", (event) => {
     event.stopPropagation();
-    deleteConversation(session.sessionId);
+    deleteConversation(session.sessionId, remove);
   });
 
   row.append(main, remove);
@@ -105,14 +174,6 @@ function openConversation(sessionId: string): void {
   postToHost({ type: "SELECT_SESSION", sessionId });
   requestTranscript(sessionId);
   markPreviewedRow();
-}
-
-function deleteConversation(sessionId: string): void {
-  if (previewSessionId === sessionId) {
-    previewSessionId = undefined;
-    renderPreview(undefined, []);
-  }
-  postToHost({ type: "DELETE_SESSION", sessionId });
 }
 
 function requestTranscript(sessionId: string): void {
@@ -226,6 +287,10 @@ onHostMessage((message) => {
         }
       }
       activeSessionId = message.activeSessionId;
+      lastSessions = message.sessions;
+      // A rebuilt list replaces the delete buttons: any
+      // pending arm is void (never delete unconfirmed).
+      disarmDelete();
       render(message.sessions);
       break;
     }

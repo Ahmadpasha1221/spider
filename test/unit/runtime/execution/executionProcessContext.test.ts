@@ -47,7 +47,7 @@ describe("background processes follow the execution context", () => {
     const processes = new BackgroundProcessManager({ spawnFn: spawn.spawnFn, immediateExitGraceMs: 0 });
     const exec = manager({ hostPlatform: "win32", terminalShellPath: "C:\\Windows\\System32\\cmd.exe" });
     const context = exec.resolve(UNC_WSL_WORKSPACE);
-    const cwd = exec.resolveCwd(UNC_WSL_WORKSPACE, `${UNC_WSL_WORKSPACE}\\sites\\app`);
+    const cwd = exec.resolveExecutionCwd(UNC_WSL_WORKSPACE, `${UNC_WSL_WORKSPACE}\\sites\\app`);
 
     const started = await processes.start({
       command: "pnpm",

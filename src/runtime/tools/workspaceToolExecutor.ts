@@ -403,19 +403,27 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
    * The ONE place the executor asks the ExecutionManager where a command runs.
    * `WorkspaceToolExecutor` never guesses the environment; an unresolvable
    * context becomes a structured tool error instead of a silent fallback.
+   *
+   * Security invariant: if executionManager is absent, execution FAILS CLOSED.
+   * We do NOT fall back to the host directory with no context, because that
+   * would cause commandRunner to throw ExecutionContextError (which is correct
+   * behavior), but more importantly it would allow a future regression where
+   * context becomes optional again. Failing here at the boundary is explicit.
    */
   private resolveExecution(
     workspacePath: string,
     hostDirectory: string,
-  ): { context?: ExecutionContext; directory: string } {
+  ): { context: ExecutionContext; directory: string } {
     if (!this.executionManager) {
-      return { directory: hostDirectory };
+      throw new ToolExecutionError(
+        "dependency_unavailable",
+        "Command execution requires an execution context but no ExecutionManager is available. " +
+        "This is a configuration error — Spider will not fall back to uncontrolled shell execution.",
+      );
     }
     try {
-      return {
-        context: this.executionManager.resolve(workspacePath),
-        directory: this.executionManager.resolveCwd(workspacePath, hostDirectory),
-      };
+      const { context, executionCwd } = this.executionManager.resolveExecution(workspacePath, hostDirectory);
+      return { context, directory: executionCwd };
     } catch (error) {
       if (error instanceof ExecutionContextError) {
         throw new ToolExecutionError("dependency_unavailable", error.message);
@@ -440,7 +448,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       signal,
       ...(onOutput ? { onOutput } : {}),
-      ...(context ? { context } : {}),
+      context,
     });
   }
 
@@ -486,7 +494,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       cwd: executionCwd,
       ...(startupTimeoutMs !== undefined ? { startupTimeoutMs } : {}),
       ...(signal ? { signal } : {}),
-      ...(context ? { context } : {}),
+      context,
     });
 
     return {

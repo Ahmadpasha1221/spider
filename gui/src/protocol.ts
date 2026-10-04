@@ -64,7 +64,9 @@ export type GuiToHost =
   | { type: "GET_EXTENSION_INFO" }
   | { type: "OPEN_DIFF"; changeId: string }
   | { type: "RESOLVE_FILE_CHANGE"; changeId: string; decision: "ACCEPT" | "REJECT" }
-  | { type: "OPEN_FILE"; path: string };
+  | { type: "OPEN_FILE"; path: string }
+  /** Markdown link click: open the URL outside the webview. */
+  | { type: "OPEN_URL"; url: string };
 
 export interface SessionListItem {
   sessionId: string;

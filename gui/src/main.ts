@@ -34,6 +34,11 @@ const settingsBtn = mustEl("settings-btn") as HTMLButtonElement;
 const settingsBack = mustEl("settings-back") as HTMLButtonElement;
 const historyBtn = mustEl("history-btn") as HTMLButtonElement;
 const newSessionBtn = mustEl("new-session-btn") as HTMLButtonElement;
+// Conversation switcher (A10): inline access to recent
+// conversations from the chat header.
+const sessionBtn = mustEl("session-btn") as HTMLButtonElement;
+const sessionBtnTitle = mustEl("session-btn-title") as HTMLSpanElement;
+const sessionMenu = mustEl("session-menu") as HTMLDivElement;
 const setupBanner = mustEl("setup-banner");
 const settingsView = mustEl("settings-view");
 const chatView = mustEl("chat-view");
@@ -49,6 +54,7 @@ const messageList = createMessageList(messageListRoot, {
   onAcceptChange: (changeId) => postToHost({ type: "RESOLVE_FILE_CHANGE", changeId, decision: "ACCEPT" }),
   onRejectChange: (changeId) => postToHost({ type: "RESOLVE_FILE_CHANGE", changeId, decision: "REJECT" }),
   onOpenArtifact: (path) => postToHost({ type: "OPEN_FILE", path }),
+  onOpenUrl: (url) => postToHost({ type: "OPEN_URL", url }),
   onDeleteMessage: deleteMessage,
   onSuggest: (prompt) => composer.setPrompt(prompt),
 });
@@ -85,6 +91,31 @@ settingsBack.addEventListener("click", () => {
 // dedicated editor tab rather than occupying sidebar space.
 newSessionBtn.addEventListener("click", () => startNewConversation());
 historyBtn.addEventListener("click", () => postToHost({ type: "OPEN_HISTORY" }));
+// Conversation switcher: open/close, select a conversation,
+// close on outside click or Escape.
+sessionBtn.addEventListener("click", () => {
+  if (sessionMenuOpen) {
+    closeSessionMenu();
+  } else {
+    openSessionMenu();
+  }
+});
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target;
+  if (
+    sessionMenuOpen
+    && target instanceof Node
+    && !sessionBtn.contains(target)
+    && !sessionMenu.contains(target)
+  ) {
+    closeSessionMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (sessionMenuOpen && event.key === "Escape") {
+    closeSessionMenu();
+  }
+});
 // Clicking the Spider logo opens (or focuses) the Spider editor tab.
 brandBtn.addEventListener("click", () => postToHost({ type: "OPEN_AGENT_EDITOR" }));
 
@@ -477,6 +508,16 @@ function scheduleUiSync(): void {
 
 function render(): void {
   setTextOnce(runtimePill, runtimeLabel());
+  // Conversation switcher label follows the host's
+  // active session (textContent-only, like the pill).
+  const activeSession = state.sessions.find(
+    (session) => session.sessionId === state.activeSessionId,
+  );
+  setTextOnce(
+    sessionBtnTitle,
+    activeSession?.currentTask?.trim() || "New conversation",
+  );
+  sessionBtn.title = activeSession?.currentTask?.trim() || "New conversation";
   const settingsOpen = state.view === "settings";
   // The header buttons are icon-only SVGs: only the pressed state and tooltip
   // change, never the children — replacing innerHTML/textContent here would
@@ -512,6 +553,84 @@ function setTextOnce(el: HTMLElement, text: string): void {
   if (el.textContent !== text) {
     el.textContent = text;
   }
+}
+
+/**
+ * Conversation switcher (A10). The menu is a snapshot:
+ * it is built once per open and never rebuilt while
+ * open, so host event bursts cannot churn menu items
+ * under the pointer. Close and reopen to refresh.
+ */
+let sessionMenuOpen = false;
+
+function openSessionMenu(): void {
+  sessionMenuOpen = true;
+  sessionMenu.hidden = false;
+  sessionBtn.setAttribute("aria-expanded", "true");
+  buildSessionMenu();
+}
+
+function closeSessionMenu(): void {
+  if (!sessionMenuOpen) {
+    return;
+  }
+  sessionMenuOpen = false;
+  sessionMenu.hidden = true;
+  sessionBtn.setAttribute("aria-expanded", "false");
+}
+
+function buildSessionMenu(): void {
+  const sessions = [...state.sessions].sort(
+    (a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
+  );
+  if (sessions.length === 0) {
+    const note = document.createElement("p");
+    note.className = "session-menu-empty";
+    note.textContent = "No conversations yet.";
+    sessionMenu.replaceChildren(note);
+    return;
+  }
+  const items = sessions.map((session) => {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "session-menu-item";
+    item.setAttribute("role", "option");
+    item.setAttribute("aria-selected", String(session.sessionId === state.activeSessionId));
+    const title = document.createElement("span");
+    title.className = "session-menu-item-title";
+    title.textContent = session.currentTask?.trim() || "Untitled conversation";
+    const meta = document.createElement("span");
+    meta.className = "session-menu-item-meta";
+    meta.textContent = [historyBasename(session.workspacePath), formatAge(session.updatedAt)]
+      .filter(Boolean)
+      .join(" · ");
+    item.append(title, meta);
+    item.addEventListener("click", () => {
+      closeSessionMenu();
+      if (session.sessionId !== state.activeSessionId) {
+        postToHost({ type: "SELECT_SESSION", sessionId: session.sessionId });
+      }
+    });
+    return item;
+  });
+  sessionMenu.replaceChildren(...items);
+}
+
+function historyBasename(fsPath: string): string {
+  const parts = fsPath.split(/[\\/]/).filter((part) => part.length > 0);
+  return parts[parts.length - 1] ?? fsPath;
+}
+
+function formatAge(updatedAt: number | undefined): string {
+  if (updatedAt === undefined) {
+    return "";
+  }
+  const minutes = Math.round((Date.now() - updatedAt) / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return new Date(updatedAt).toLocaleDateString();
 }
 
 /**

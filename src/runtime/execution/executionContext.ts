@@ -162,6 +162,53 @@ export function sanitizeEnvironment(
 }
 
 /**
+ * Builds a minimal environment for WSL backend commands.
+ * Avoids leaking Windows-specific variables (PATH, HOME, USERPROFILE, etc.)
+ * into the Linux execution environment.
+ */
+export function buildWslEnvironment(
+  hostEnv: Readonly<Record<string, string>>,
+): Readonly<Record<string, string>> {
+  // Allowlist of safe variables to pass through to WSL.
+  // We explicitly do NOT pass PATH, HOME, USERPROFILE, TEMP, TMP, etc.
+  const allowedKeys = new Set([
+    // Locale and language
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LANGUAGE",
+    // Terminal
+    "TERM",
+    "COLORTERM",
+    // SSH agent (if forwarded)
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    // Git
+    "GIT_AUTHOR_NAME",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME",
+    "GIT_COMMITTER_EMAIL",
+    // Proxy
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    // Custom Spider variables
+    "SPIDER_",
+  ]);
+
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(hostEnv)) {
+    if (allowedKeys.has(key) || key.startsWith("SPIDER_")) {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+/**
  * Resolves the authoritative execution context for one workspace path.
  *
  * Precedence:
@@ -192,7 +239,7 @@ export function resolveExecutionContext(
       platform: "wsl",
       shell,
       backend: "local",
-      cwd: workspacePath,
+      workspaceRoot: workspacePath,
       ...(shellPath ? { shellPath } : {}),
       env,
       ...(distro ? { wslDistro: distro } : {}),
@@ -209,7 +256,7 @@ export function resolveExecutionContext(
       platform: "wsl",
       shell,
       backend: "wsl",
-      cwd: wslUncToLinuxPath(workspacePath),
+      workspaceRoot: wslUncToLinuxPath(workspacePath),
       env,
       wslDistro: distro,
     };
@@ -224,7 +271,7 @@ export function resolveExecutionContext(
       platform,
       shell,
       backend: "local",
-      cwd: workspacePath,
+      workspaceRoot: workspacePath,
       ...(shellPath ? { shellPath } : {}),
       env,
       remoteAuthority: remoteName,
@@ -238,7 +285,7 @@ export function resolveExecutionContext(
     platform,
     shell,
     backend: "local",
-    cwd: workspacePath,
+    workspaceRoot: workspacePath,
     ...(shellPath ? { shellPath } : {}),
     env,
   };
@@ -246,13 +293,17 @@ export function resolveExecutionContext(
 
 /** Human-readable, secret-free one-line summary of a resolved context. */
 export function describeExecutionContext(context: ExecutionContext): string {
-  const parts: string[] = [`type: ${context.executionType}`, `platform: ${context.platform}`, `shell: ${context.shell}`];
+  const parts: string[] = [
+    `type: ${context.executionType}`,
+    `platform: ${context.platform}`,
+    `shell: ${context.shell}`,
+  ];
   if (context.wslDistro) {
     parts.push(`distro: ${context.wslDistro}`);
   }
   if (context.remoteAuthority) {
     parts.push(`remote: ${context.remoteAuthority}`);
   }
-  parts.push(`cwd: ${context.cwd}`);
+  parts.push(`workspaceRoot: ${context.workspaceRoot}`);
   return parts.join("; ");
 }

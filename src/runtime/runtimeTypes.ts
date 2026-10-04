@@ -182,6 +182,13 @@ export interface RuntimeSendRequest {
    * run_command executes without probing the shell itself.
    */
   readonly executionContextSummary?: string;
+  /**
+   * Formatted `.spiderrules` content for this workspace (see
+   * `src/runtime/rules/workspaceRules.ts`). Injected into the
+   * system prompt as user instructions; rules are context only
+   * and never alter permissions, tools or safety controls.
+   */
+  readonly rulesContext?: string;
   readonly messages?: readonly RuntimeMessage[];
   readonly signal?: AbortSignal;
   readonly onToolCall?: (

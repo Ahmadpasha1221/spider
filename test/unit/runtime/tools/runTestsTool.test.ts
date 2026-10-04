@@ -9,9 +9,29 @@ import {
   APPROVED_TEST_RUNNERS,
 } from "../../../../src/runtime/tools/runTestsTool";
 import { BackgroundProcessManager, type BackgroundProcessManagerOptions } from "../../../../src/runtime/tools/backgroundProcessManager";
+import { ExecutionManager } from "../../../../src/runtime/execution/executionManager";
 import { makeWorkspace, type TestWorkspace } from "./toolTestUtils";
 import { EventEmitter } from "node:events";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+
+type SpawnFn = NonNullable<BackgroundProcessManagerOptions["spawnFn"]>;
+
+/**
+ * Builds a minimal ExecutionManager for the current host platform.
+ * Tests that only verify output/timeout/cancellation logic do not need a real
+ * workspace: the fake spawn never touches the filesystem.
+ */
+function makeExecutionManager(_workspacePath: string): ExecutionManager {
+  return new ExecutionManager({
+    environment: {
+      hostPlatform: process.platform,
+      terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+      ) as Record<string, string>,
+    },
+  });
+}
 
 type SpawnFn = NonNullable<BackgroundProcessManagerOptions["spawnFn"]>;
 
@@ -124,7 +144,7 @@ describe("run_tests execution", () => {
     const created = await makeWorkspace({});
     workspaces.push(created);
     const { manager } = makeManager({ exitCode: 0, stdout: "all 10 tests passed\n" });
-    const result = await runTests({ runner: "pnpm", args: ["run", "test"] }, { workspacePath: created.root }, { backgroundProcesses: manager });
+    const result = await runTests({ runner: "pnpm", args: ["run", "test"] }, { workspacePath: created.root }, { backgroundProcesses: manager, executionManager: makeExecutionManager(created.root) });
     expect(result.passed).toBe(true);
     expect(result.exitCode).toBe(0);
     expect(result.timedOut).toBe(false);
@@ -139,7 +159,7 @@ describe("run_tests execution", () => {
     const created = await makeWorkspace({});
     workspaces.push(created);
     const { manager } = makeManager({ exitCode: 1, stderr: "2 tests failed\n" });
-    const result = await runTests({ runner: "npm", args: ["test"] }, { workspacePath: created.root }, { backgroundProcesses: manager });
+    const result = await runTests({ runner: "npm", args: ["test"] }, { workspacePath: created.root }, { backgroundProcesses: manager, executionManager: makeExecutionManager(created.root) });
     expect(result.passed).toBe(false);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("2 tests failed");
@@ -149,7 +169,7 @@ describe("run_tests execution", () => {
     const created = await makeWorkspace({});
     workspaces.push(created);
     const { manager, children, killCalls } = makeManager({ hang: true });
-    const pending = runTests({ runner: "pnpm", args: ["test"], timeoutMs: 1_000 }, { workspacePath: created.root }, { backgroundProcesses: manager });
+    const pending = runTests({ runner: "pnpm", args: ["test"], timeoutMs: 1_000 }, { workspacePath: created.root }, { backgroundProcesses: manager, executionManager: makeExecutionManager(created.root) });
     const result = await pending;
     expect(result.timedOut).toBe(true);
     expect(result.passed).toBe(false);
@@ -165,7 +185,7 @@ describe("run_tests execution", () => {
     const pending = runTests(
       { runner: "pnpm", args: ["test"] },
       { workspacePath: created.root, signal: controller.signal },
-      { backgroundProcesses: manager },
+      { backgroundProcesses: manager, executionManager: makeExecutionManager(created.root) },
     );
     setTimeout(() => controller.abort(), 20);
     const result = await pending;
@@ -179,7 +199,7 @@ describe("run_tests execution", () => {
     workspaces.push(created);
     const huge = "x".repeat(TEST_RUN_LIMITS.maxOutputChars + 1000);
     const { manager } = makeManager({ exitCode: 0, stdout: huge, stderr: huge });
-    const result = await runTests({ runner: "pnpm", args: ["test"] }, { workspacePath: created.root }, { backgroundProcesses: manager });
+    const result = await runTests({ runner: "pnpm", args: ["test"] }, { workspacePath: created.root }, { backgroundProcesses: manager, executionManager: makeExecutionManager(created.root) });
     expect(result.stdout.length).toBeLessThanOrEqual(TEST_RUN_LIMITS.maxOutputChars + 20);
     expect(result.truncated).toBe(true);
   });
@@ -189,14 +209,14 @@ describe("run_tests execution", () => {
     workspaces.push(created);
     const failing = makeManager({ failSpawn: true });
     await expect(
-      runTests({ runner: "pnpm" }, { workspacePath: created.root }, { backgroundProcesses: failing.manager }),
+      runTests({ runner: "pnpm" }, { workspacePath: created.root }, { backgroundProcesses: failing.manager, executionManager: makeExecutionManager(created.root) }),
     ).rejects.toMatchObject({ code: "dependency_unavailable" });
 
     const controller = new AbortController();
     controller.abort();
     const idle = makeManager({});
     await expect(
-      runTests({ runner: "pnpm" }, { workspacePath: created.root, signal: controller.signal }, { backgroundProcesses: idle.manager }),
+      runTests({ runner: "pnpm" }, { workspacePath: created.root, signal: controller.signal }, { backgroundProcesses: idle.manager, executionManager: makeExecutionManager(created.root) }),
     ).rejects.toMatchObject({ code: "cancelled" });
     expect(idle.children).toHaveLength(0);
   });

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { RuntimeManager } from "../../../src/runtime/runtimeManager";
 import { WorkspaceToolExecutor } from "../../../src/runtime/tools/workspaceToolExecutor";
+import { ExecutionManager } from "../../../src/runtime/execution/executionManager";
 import { PermissionManager } from "../../../src/permissions/permissionManager";
 import { createDefaultPermissionPolicy } from "../../../src/permissions/permissionPolicy";
 import type {
@@ -64,27 +65,50 @@ class ToolCallingRuntime implements AgentRuntime {
 describe("RuntimeManager live command output", () => {
   it("publishes partial command_output while the command is still running", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "codevia-stream-"));
-    // A portable two-stage command: writes immediately, then again after 250ms.
-    const script = path.join(root, "slow.js");
-    await fs.writeFile(
-      script,
-      "process.stdout.write('first');setTimeout(() => process.stdout.write('second'), 250);",
-      "utf8",
-    );
 
     const permissionManager = new PermissionManager(
       createDefaultPermissionPolicy({ isWorkspaceTrusted: () => true }),
     );
+    const executionManager = new ExecutionManager({
+      environment: {
+        hostPlatform: process.platform,
+        terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+        env: Object.fromEntries(
+          Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+        ) as Record<string, string>,
+      },
+    });
+
+    // Use a stub runCommand that fires onOutput synchronously, then waits
+    // 300ms before completing. This lets the 120ms streaming timer fire
+    // at least once before the command is "done", without relying on
+    // OS-level subprocess stdout buffering behaviour (which varies on Windows).
+    const stubRunCommand = vi.fn(async (options: import("../../../src/runtime/tools/commandRunner").RunCommandOptions) => {
+      // Fire the streaming hook immediately so the partial timer starts.
+      options.onOutput?.("stdout", "first");
+      // Await enough time for the 120ms partial timer to fire.
+      await new Promise<void>((resolve) => setTimeout(resolve, 300));
+      options.onOutput?.("stdout", "second");
+      return {
+        command: options.command,
+        cwd: options.cwd,
+        stdout: "firstsecond",
+        stderr: "",
+        exitCode: 0,
+        cancelled: false,
+        timedOut: false,
+      };
+    });
+
     const manager = new RuntimeManager({
       sessionStore: createStore() as never,
       permissionManager,
-      runtimes: [new ToolCallingRuntime(`node "${script}"`)],
-      toolExecutor: new WorkspaceToolExecutor(),
+      runtimes: [new ToolCallingRuntime("echo streaming-test")],
+      toolExecutor: new WorkspaceToolExecutor({ executionManager, runCommand: stubRunCommand }),
       defaultWorkspacePath: root,
     });
     await manager.setProvider({ provider: "mock" });
     const session = manager.createSession(root);
-    // Non-destructive execute: the runtime shield approves it without a prompt.
     permissionManager.setRuntimeAutoApprove(true, "conversation");
 
     const partials: RuntimeEvent[] = [];

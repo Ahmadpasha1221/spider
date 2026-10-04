@@ -36,7 +36,7 @@ export const wslUncPathTranslator: WorkspacePathTranslator = {
   toExecutionCwd(workspacePath, hostAbsolutePath, context) {
     const relative = path.win32.relative(path.win32.normalize(workspacePath), path.win32.normalize(hostAbsolutePath));
     if (relative.length === 0 || relative === ".") {
-      return context.cwd;
+      return context.workspaceRoot;
     }
     if (relative.startsWith("..") || path.win32.isAbsolute(relative)) {
       throw new ExecutionContextError(
@@ -44,7 +44,7 @@ export const wslUncPathTranslator: WorkspacePathTranslator = {
       );
     }
     const segments = relative.split(/[\\/]+/).filter((segment) => segment.length > 0);
-    return posixJoin(context.cwd, segments);
+    return posixJoin(context.workspaceRoot, segments);
   },
 };
 

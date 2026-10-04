@@ -50,6 +50,13 @@ export interface RuntimeManagerOptions {
    * injected into the agent prompt so the model knows where commands run.
    */
   readonly executionManager?: ExecutionManager;
+  /**
+   * Workspace-rules loader (`.spiderrules`). Injected by the extension
+   * host (it owns the VS Code setting + file watcher); returns the
+   * formatted rules context for a workspace, or undefined when none
+   * apply. Best-effort: a failing loader never blocks a run.
+   */
+  readonly rulesLoader?: (workspacePath: string) => Promise<string | undefined>;
 }
 
 interface ActiveRun {
@@ -639,6 +646,13 @@ export class RuntimeManager implements vscode.Disposable {
       }
 
       const executionContextSummary = this.options.executionManager?.describe(session.workspacePath);
+      // Rules are context only: a load failure must never fail the run.
+      let rulesContext: string | undefined;
+      try {
+        rulesContext = await this.options.rulesLoader?.(session.workspacePath);
+      } catch {
+        rulesContext = undefined;
+      }
       await runtime.sendMessage(
         {
           sessionId,
@@ -649,6 +663,7 @@ export class RuntimeManager implements vscode.Disposable {
           retry,
           mode,
           ...(executionContextSummary ? { executionContextSummary } : {}),
+          ...(rulesContext ? { rulesContext } : {}),
           signal: controller.signal,
           onToolCall: (call, signal) => this.handleToolCall(sessionId, call, signal, mode),
           onStreamDelta: (text) => {

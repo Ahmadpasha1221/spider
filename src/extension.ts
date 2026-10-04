@@ -25,6 +25,7 @@ import { OpenAICompatibleRuntime } from "./runtime/openaiCompatible/openaiCompat
 import { OpenRouterRuntime } from "./runtime/openrouter/openRouterRuntime";
 import { WorkspaceToolExecutor } from "./runtime/tools/workspaceToolExecutor";
 import { ExecutionManager } from "./runtime/execution/executionManager";
+import { WorkspaceRulesService } from "./agent/workspaceRulesService";
 import type { ExecutionEnvironment, ExecutionShell } from "./runtime/execution/executionTypes";
 import { createVSCodeDiagnosticsSource } from "./runtime/diagnostics/diagnosticsSource";
 import { createVSCodeEditorContextSource } from "./runtime/editor/editorContextSource";
@@ -114,6 +115,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     environment: createExecutionEnvironment(),
     logger: { info: (message, logContext) => logger.info(message, logContext ?? {}) },
   });
+  // Workspace rules (.spiderrules): watched for live reload and
+  // injected into the agent system prompt by the runtime.
+  const workspaceRulesService = new WorkspaceRulesService();
+  context.subscriptions.push(workspaceRulesService);
   const toolExecutor = new WorkspaceToolExecutor({
     diagnostics: createVSCodeDiagnosticsSource(),
     editor: createVSCodeEditorContextSource(),
@@ -134,6 +139,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diffView,
     providerConfigStore,
     executionManager,
+    rulesLoader: (workspacePath) => workspaceRulesService.getRulesContext(workspacePath),
   });
 
   // The execution context is cached per workspace; drop it when the workspace

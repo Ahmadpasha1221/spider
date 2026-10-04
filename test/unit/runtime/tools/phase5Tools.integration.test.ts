@@ -16,6 +16,7 @@ import type { DiagnosticContext } from "../../../../src/context/contextTypes";
 import { EventEmitter } from "node:events";
 import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { makeSession, makeWorkspace, type TestWorkspace } from "./toolTestUtils";
+import { ExecutionManager } from "../../../../src/runtime/execution/executionManager";
 
 type SpawnFn = NonNullable<BackgroundProcessManagerOptions["spawnFn"]>;
 
@@ -54,10 +55,20 @@ const DIAGNOSTICS: DiagnosticsSource = {
 
 function makeRouter(options: { workspacePath?: string; spawnFn?: SpawnFn } = {}) {
   const workspacePath = options.workspacePath ?? "/ws";
+  const executionManager = new ExecutionManager({
+    environment: {
+      hostPlatform: process.platform,
+      terminalShellPath: process.env.SHELL ?? (process.platform === "win32" ? "cmd.exe" : "/bin/sh"),
+      env: Object.fromEntries(
+        Object.entries(process.env).filter(([, v]) => typeof v === "string"),
+      ) as Record<string, string>,
+    },
+  });
   const executor = new WorkspaceToolExecutor({
     backgroundProcesses: new BackgroundProcessManager(options.spawnFn ? { spawnFn: options.spawnFn } : {}),
     language: LANGUAGE,
     diagnostics: DIAGNOSTICS,
+    executionManager,
   });
   const router = new ToolRouter(executor);
   const session = makeSession(workspacePath);
