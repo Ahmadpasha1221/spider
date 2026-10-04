@@ -18,9 +18,12 @@ Paths in tool arguments are relative to the workspace root, such as simple.py or
 Never tell the user a file was created, changed, or a command succeeded unless the tool result says success.
 Call finish only after the required operations have succeeded.`;
 
-export function buildAgentSystemPrompt(modelId?: string): string {
+export function buildAgentSystemPrompt(modelId?: string, executionContextSummary?: string): string {
   const modelLine = modelId ? `\nSelected model: ${modelId}.` : "";
-  return `${LOCAL_AGENT_SYSTEM_PROMPT}${modelLine}`;
+  const executionLine = executionContextSummary
+    ? `\n\nExecution environment (resolved by Spider for the current workspace):\n${executionContextSummary}\nrun_command executes in this environment automatically. Do not prefix commands with wsl.exe, cmd.exe, powershell.exe, or bash.exe, and do not probe the environment with pwd, which, or find: Spider already runs commands in the correct workspace shell and working directory.`
+    : "";
+  return `${LOCAL_AGENT_SYSTEM_PROMPT}${modelLine}${executionLine}`;
 }
 
 /**

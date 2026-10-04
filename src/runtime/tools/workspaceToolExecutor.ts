@@ -2,6 +2,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { RuntimeToolCall, RuntimeToolExecutor, RuntimeToolExecutorContext } from "../runtimeTypes";
 import { runWorkspaceCommand } from "./commandRunner";
+import type { ExecutionManager } from "../execution/executionManager";
+import { ExecutionContextError } from "../execution/executionTypes";
 import { isLocalToolName, type LocalToolName } from "./toolRegistry";
 import { pathExists, resolveWorkspacePathSafe, toWorkspaceRelativePath } from "./workspacePath";
 import { readMultipleFiles, readWorkspaceTextFile } from "./filesystemTools";
@@ -53,6 +55,11 @@ export interface WorkspaceToolExecutorOptions {
   readonly webSearch?: WebSearchProvider;
   /** Language intelligence (symbols/definition/references) for Phase 5 tools. */
   readonly language?: LanguageSource;
+  /**
+   * Authoritative execution-context resolver (see ExecutionManager). Injected by
+   * the extension so run_command runs in the correct workspace environment.
+   */
+  readonly executionManager?: ExecutionManager;
 }
 
 export class WorkspaceToolExecutor implements RuntimeToolExecutor {
@@ -64,6 +71,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
   private readonly resolveHost?: HostResolver;
   private readonly webSearch?: WebSearchProvider;
   private readonly language?: LanguageSource;
+  private readonly executionManager?: ExecutionManager;
 
   constructor(options: WorkspaceToolExecutorOptions = {}) {
     this.diagnostics = options.diagnostics;
@@ -74,6 +82,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     this.resolveHost = options.resolveHost;
     this.webSearch = options.webSearch;
     this.language = options.language;
+    this.executionManager = options.executionManager;
   }
 
   async execute(call: RuntimeToolCall, context: RuntimeToolExecutorContext): Promise<unknown> {
@@ -385,13 +394,30 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     signal?: AbortSignal,
     onOutput?: (stream: "stdout" | "stderr", chunk: string) => void,
   ): Promise<unknown> {
-    const workingDirectory = await resolveWorkspacePathSafe(workspacePath, cwd && cwd.length > 0 ? cwd : ".");
+    const hostDirectory = await resolveWorkspacePathSafe(workspacePath, cwd && cwd.length > 0 ? cwd : ".");
+    // The ExecutionManager is the only component that decides WHERE the command
+    // runs. CommandRunner never inspects the host environment itself.
+    let context;
+    let executionDirectory = hostDirectory;
+    if (this.executionManager) {
+      try {
+        context = this.executionManager.resolve(workspacePath);
+        executionDirectory = this.executionManager.resolveCwd(workspacePath, hostDirectory);
+      } catch (error) {
+        if (error instanceof ExecutionContextError) {
+          // Structured failure: never silently fall back to a different shell.
+          throw new ToolExecutionError("dependency_unavailable", error.message);
+        }
+        throw error;
+      }
+    }
     return runWorkspaceCommand({
       command,
-      cwd: workingDirectory,
+      cwd: executionDirectory,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       signal,
       ...(onOutput ? { onOutput } : {}),
+      ...(context ? { context } : {}),
     });
   }
 
