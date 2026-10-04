@@ -26,6 +26,7 @@ import {
   RuntimeToolExecutorContext,
 } from "./runtimeTypes";
 import { BackgroundProcessManager } from "./tools/backgroundProcessManager";
+import type { ExecutionManager } from "./execution/executionManager";
 import { UserQuestionBroker } from "./userInteraction/userQuestionBroker";
 import { TaskPlanStore } from "./state/taskPlan";
 
@@ -42,6 +43,11 @@ export interface RuntimeManagerOptions {
   readonly providerConfigStore?: ProviderConfigStore;
   /** Injected background-process manager; disposed with the runtime. */
   readonly backgroundProcesses?: import("./tools/backgroundProcessManager").BackgroundProcessManager;
+  /**
+   * Authoritative execution-context resolver. When present, its safe summary is
+   * injected into the agent prompt so the model knows where commands run.
+   */
+  readonly executionManager?: ExecutionManager;
 }
 
 interface ActiveRun {
@@ -622,6 +628,7 @@ export class RuntimeManager implements vscode.Disposable {
         return;
       }
 
+      const executionContextSummary = this.options.executionManager?.describe(session.workspacePath);
       await runtime.sendMessage(
         {
           sessionId,
@@ -631,6 +638,7 @@ export class RuntimeManager implements vscode.Disposable {
           prompt,
           retry,
           mode,
+          ...(executionContextSummary ? { executionContextSummary } : {}),
           signal: controller.signal,
           onToolCall: (call, signal) => this.handleToolCall(sessionId, call, signal, mode),
           onStreamDelta: (text) => {

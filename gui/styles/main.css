@@ -23,8 +23,10 @@
 html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--fg); font-family: var(--vscode-font-family, system-ui, sans-serif); font-size: var(--vscode-font-size, 13px); }
 button, input, select, textarea { font: inherit; }
 
-/* Sharp edges everywhere: inputs, buttons, selects, cards, messages */
-button, input, select, textarea, .provider-card, .setup-banner, .message, .composer { border-radius: 0; }
+/* Soft, minimal geometry: rounded surfaces, sharp only for tiny status pills. */
+button, input, select, textarea, .provider-card, .setup-banner, .composer,
+.exec-card, .artifact-card, .settings-row, .history-row, .history-preview, .question-card { border-radius: 8px; }
+.exec-status, .exec-toggle, .settings-badge { border-radius: 999px; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
@@ -45,14 +47,21 @@ input:focus, select:focus, textarea:focus {
 .brand-logo { width: 18px; height: 18px; object-fit: contain; flex-shrink: 0; }
 .brand-name { user-select: none; }
 .runtime-pill { flex: 1; min-width: 0; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.icon-btn { border: 0; background: transparent; color: var(--muted); padding: 4px 7px; cursor: pointer; }
+/* Icon-only header actions: fixed-size targets that never shift layout. */
+.icon-btn {
+  border: 0; background: transparent; color: var(--muted);
+  width: 30px; height: 30px; padding: 0; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer; flex-shrink: 0;
+}
+.icon-btn svg { display: block; }
 .icon-btn:hover { color: var(--accent-soft); background: var(--user-bg); }
 .icon-btn:active { color: var(--accent); }
+.icon-btn.is-active { color: var(--accent-soft); background: var(--user-bg); }
 .icon-btn:disabled { opacity: .45; cursor: default; }
 /* Header actions hug the top-right corner; the runtime pill flexes to push
    them there, so no absolute positioning is needed. */
 .header-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
-.icon-btn-plus { font-size: 16px; font-weight: 600; line-height: 1; padding: 3px 9px; }
 
 .view { display: flex; flex-direction: column; flex: 1; min-height: 0; padding: 10px; gap: 8px; }
 .view[hidden] { display: none; }
@@ -73,16 +82,35 @@ input:focus, select:focus, textarea:focus {
 .setup-banner .btn { align-self: flex-start; margin-top: 3px; }
 
 
-.message-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px; }
+.message-list { flex: 1; min-height: 0; overflow: auto; padding: 4px 2px; display: flex; flex-direction: column; }
 .empty-chat { height: 100%; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px; text-align: center; color: var(--muted); }
 .empty-chat strong { color: var(--fg); font-size: 15px; }
 .empty-chat span { max-width: 280px; line-height: 1.45; }
-.message { margin: 0 0 10px; padding: 9px 10px; border: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; }
-.message-user { background: var(--user-bg); }
-.message-agent { border-left: 3px solid var(--agent-border); }
+/* Minimal message chrome: the agent speaks without a box; the user gets a
+   soft tinted bubble aligned right. Long transcripts stay calm. */
+.message { margin: 0 0 12px; padding: 2px; white-space: pre-wrap; word-break: break-word; }
+.message-user {
+  align-self: flex-end; max-width: 88%;
+  padding: 8px 12px; border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 13%, var(--user-bg));
+}
+.message-agent { padding: 2px; }
+.message-system, .message-tool { padding: 0; }
 .message-meta { display: block; margin-bottom: 4px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.message-user .message-meta { text-align: right; }
 .message-thinking { color: var(--muted); font-style: italic; }
-.message-error { color: var(--error); border-color: color-mix(in srgb, var(--error) 50%, var(--border)); }
+.message-error {
+  padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--error) 50%, var(--border));
+  border-radius: 8px; color: var(--error);
+}
+/* Starter prompts for an empty conversation. */
+.suggest-chips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 10px; }
+.suggest-chip {
+  padding: 5px 12px; font-size: 12px; cursor: pointer;
+  background: transparent; color: var(--accent-soft);
+  border: 1px solid var(--accent); border-radius: 999px;
+}
+.suggest-chip:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent-contrast); }
 
 /* Agent activity blocks. The Thinking block is a live status element:
    it appears with a soft expand/fade, and settles (not disappears) when the
@@ -124,7 +152,7 @@ input:focus, select:focus, textarea:focus {
 /* Collapsible exec output: one attribute flip drives visibility, no rebuild. */
 .exec-toggle {
   flex-shrink: 0; padding: 1px 6px; font-size: 10px; cursor: pointer;
-  background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 0;
+  background: transparent; color: var(--muted); border: 1px solid var(--border); border-radius: 6px;
 }
 .exec-toggle:hover { color: var(--accent-soft); border-color: var(--accent); }
 .exec-box[data-expanded="false"] .exec-detail,
@@ -170,57 +198,70 @@ input:focus, select:focus, textarea:focus {
   .message-agent.streaming-line::after { content: none; }
 }
 
-.composer { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); padding: 7px; background: var(--input-bg); }
+.composer { display: flex; flex-direction: column; gap: 6px; border: 1px solid var(--border); border-radius: 12px; padding: 8px; background: var(--input-bg); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-/* Composer input: the textarea and its actions share one wrapper so the
-   buttons stay visually anchored to the input area and keep their position
-   when the textarea is resized (absolute inside a relative box — no negative
-   margins, no magic offsets). */
+/* Composer input: the textarea and its single primary action share one
+   wrapper so the button stays visually anchored to the input area
+   (absolute inside a relative box — no negative margins). */
 .composer-input { position: relative; display: block; }
 .composer-input textarea {
   width: 100%; min-height: 76px; max-height: 1000px; resize: vertical;
-  /* Top padding reserves the action row (Send sits in the top-right corner)
-     so text never runs under the buttons. */
-  padding: 34px 5px 5px; border: 1px solid transparent; outline: none;
-  background: transparent; color: var(--input-fg);
+  /* Bottom-right padding reserves the round Send button so text never runs
+     under it. */
+  padding: 8px 44px 8px 8px; border: 1px solid transparent; outline: none;
+  background: transparent; color: var(--input-fg); border-radius: 8px;
 }
 .composer-input textarea:focus { border-color: transparent; box-shadow: none; }
-.composer-actions {
-  /* Anchored to the TOP-right corner of the input area: Send (and Cancel /
-     Try Again) stay beside the first line of text, not below the textarea. */
-  position: absolute; right: 4px; top: 4px;
-  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
-  flex-wrap: nowrap; max-width: calc(100% - 8px);
+/* One round primary action, bottom-right: Send (↑) while idle, Stop (■)
+   while running. Never two buttons competing in the input area. */
+.composer-send {
+  position: absolute; right: 6px; bottom: 6px;
+  width: 32px; height: 32px; padding: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--accent-contrast);
+  border: 1px solid var(--accent); cursor: pointer;
+  font-size: 15px; line-height: 1;
 }
+.composer-send::after { content: "↑"; }
+.composer-send[data-mode="stop"]::after { content: "■"; font-size: 11px; }
+.composer-send[data-mode="stop"] { background: transparent; color: var(--error); border-color: var(--error); }
+.composer-send[data-mode="stop"]:hover:not(:disabled) { background: color-mix(in srgb, var(--error) 15%, transparent); }
+.composer-send:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent-soft); }
+.composer-send:disabled { opacity: .4; cursor: not-allowed; }
 
-/* Narrow VS Code sidebars: let the action row wrap onto a second line and
-   reserve the matching vertical space in the textarea. */
+/* Narrow VS Code sidebars: keep the round action clear of the text. */
 @media (max-width: 340px) {
-  .composer-input textarea { padding-top: 62px; }
-  .composer-actions { flex-wrap: wrap; }
+  .composer-input textarea { padding-right: 44px; }
 }
 
 /* Composer toolbar: model picker + shield, the fast-path controls. */
 .composer-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; }
-.composer-model { min-width: 0; max-width: 70%; }
+.composer-model { min-width: 0; max-width: 62%; }
 .composer-model-select {
   width: 100%; padding: 4px 6px; font-size: 12px; color: var(--input-fg);
-  background: transparent; border: 1px solid var(--border); border-radius: 0;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
   overflow: hidden; text-overflow: ellipsis; cursor: pointer;
 }
 .composer-model-select:hover:not(:disabled) { border-color: var(--accent); }
+/* Shield: a labeled switch, unmissable when ON (it disables safety prompts). */
 .shield-btn {
-  flex-shrink: 0; width: 30px; height: 26px; padding: 0;
+  flex-shrink: 0; height: 26px; padding: 0 10px; gap: 6px;
   display: inline-flex; align-items: center; justify-content: center;
-  background: transparent; color: var(--muted);
-  border: 1px solid var(--border); border-radius: 0; cursor: pointer;
+  background: transparent; color: var(--muted); font-size: 11px;
+  border: 1px solid var(--border); border-radius: 999px; cursor: pointer;
   transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+  white-space: nowrap;
 }
 .shield-btn:hover:not(:disabled) { color: var(--accent-soft); border-color: var(--accent); }
-.shield-btn.is-active { color: var(--accent-contrast); background: var(--accent); border-color: var(--accent); }
+.shield-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+.shield-btn.is-active {
+  color: var(--accent-contrast); background: var(--accent); border-color: var(--accent);
+  font-weight: 600;
+}
+.shield-btn.is-active:hover { background: var(--accent-strong); }
 .shield-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-.btn { background: var(--accent); color: var(--accent-contrast); border: 1px solid var(--accent); border-radius: 0; padding: 6px 10px; cursor: pointer; }
+.btn { background: var(--accent); color: var(--accent-contrast); border: 1px solid var(--accent); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
 .btn:hover:not(:disabled) { background: var(--accent-soft); border-color: var(--accent-soft); }
 .btn:active:not(:disabled) { background: var(--accent-strong); border-color: var(--accent-strong); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
@@ -245,7 +286,7 @@ input:focus, select:focus, textarea:focus {
   .message-actions { opacity: 1; }
 }
 
-.message-agent.streaming-line { border-left-color: var(--accent-soft); }
+.message-agent.streaming-line { border-left: 3px solid var(--accent-soft); padding-left: 8px; border-radius: 2px; }
 .message-agent.streaming-line::after { content: "▋"; color: var(--accent-soft); animation: blink 1s steps(2, start) infinite; }
 @keyframes blink { to { visibility: hidden; } }
 
@@ -265,7 +306,7 @@ input:focus, select:focus, textarea:focus {
 }
 .settings-nav-item {
   text-align: left; padding: 7px 10px; background: transparent;
-  color: var(--muted); border: 1px solid transparent; border-radius: 0;
+  color: var(--muted); border: 1px solid transparent; border-radius: 8px;
   cursor: pointer; font-size: 12px;
 }
 .settings-nav-item:hover { color: var(--fg); background: var(--user-bg); }
@@ -289,7 +330,7 @@ input:focus, select:focus, textarea:focus {
 .rule-toggle-group { display: flex; gap: 4px; margin-top: 4px; }
 .rule-toggle {
   padding: 3px 12px; background: transparent; color: var(--muted);
-  border: 1px solid var(--border); border-radius: 0; cursor: pointer; font-size: 11px;
+  border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 11px;
 }
 .rule-toggle:hover:not(:disabled) { color: var(--fg); border-color: var(--accent); }
 .rule-toggle.is-active { background: var(--accent); color: var(--accent-contrast); border-color: var(--accent); }
@@ -315,7 +356,7 @@ h2 { font-size: 13px; margin-bottom: 4px; }
 
 .field { display: flex; flex-direction: column; gap: 4px; }
 .field label { font-size: 11px; color: var(--muted); }
-.field input, .field select, .select-control { width: 100%; padding: 7px 8px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--border); border-radius: 0; }
+.field input, .field select, .select-control { width: 100%; padding: 7px 8px; background: var(--input-bg); color: var(--input-fg); border: 1px solid var(--border); border-radius: 8px; }
 .form-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 
 @media (max-width: 360px) {

@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import type { ExecutionContext } from "../execution/executionTypes";
+import { buildCommandInvocation } from "../execution/executionManager";
 
 export interface CommandRunResult {
   readonly command: string;
@@ -12,6 +14,7 @@ export interface CommandRunResult {
 
 export interface RunCommandOptions {
   readonly command: string;
+  /** Working directory *in the execution environment*. */
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
@@ -21,6 +24,15 @@ export interface RunCommandOptions {
    * complete (capped) output.
    */
   readonly onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
+  /**
+   * Resolved execution context. When present, the process is launched through
+   * the context's backend (local shell / WSL bridge) with an argv array. When
+   * absent, the legacy `shell: true` behavior is preserved for callers that do
+   * not go through the ExecutionManager.
+   */
+  readonly context?: ExecutionContext;
+  /** Injectable spawn (tests / alternative hosts). */
+  readonly spawnFn?: typeof spawn;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -35,11 +47,14 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
       return;
     }
 
-    const child = spawn(options.command, {
-      cwd: options.cwd,
-      shell: true,
-      windowsHide: true,
-    });
+    const spawnFn = options.spawnFn ?? spawn;
+    const child = options.context
+      ? spawnWithContext(spawnFn, options.context, options.command, options.cwd)
+      : spawnFn(options.command, {
+          cwd: options.cwd,
+          shell: true,
+          windowsHide: true,
+        });
 
     let stdout = "";
     let stderr = "";
@@ -92,6 +107,21 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
       options.signal?.removeEventListener("abort", onAbort);
       action();
     }
+  });
+}
+
+function spawnWithContext(
+  spawnFn: typeof spawn,
+  context: ExecutionContext,
+  command: string,
+  cwd: string,
+): ReturnType<typeof spawn> {
+  const invocation = buildCommandInvocation(context, command, cwd);
+  return spawnFn(invocation.file, [...invocation.args], {
+    ...(invocation.cwd !== undefined ? { cwd: invocation.cwd } : {}),
+    env: invocation.env,
+    shell: invocation.shell,
+    windowsHide: true,
   });
 }
 

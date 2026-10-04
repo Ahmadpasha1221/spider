@@ -24,6 +24,8 @@ import { OllamaRuntime } from "./runtime/ollama/ollamaRuntime";
 import { OpenAICompatibleRuntime } from "./runtime/openaiCompatible/openaiCompatibleRuntime";
 import { OpenRouterRuntime } from "./runtime/openrouter/openRouterRuntime";
 import { WorkspaceToolExecutor } from "./runtime/tools/workspaceToolExecutor";
+import { ExecutionManager } from "./runtime/execution/executionManager";
+import type { ExecutionEnvironment } from "./runtime/execution/executionTypes";
 import { createVSCodeDiagnosticsSource } from "./runtime/diagnostics/diagnosticsSource";
 import { createVSCodeEditorContextSource } from "./runtime/editor/editorContextSource";
 import { createVSCodeLanguageSource } from "./runtime/lsp/languageSource";
@@ -92,12 +94,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     secretKey: SECRET_KEYS.webSearchApiKey.current,
     legacySecretKey: SECRET_KEYS.webSearchApiKey.legacy,
   });
+  // Authoritative command-execution environment. Captured from VS Code (never
+  // from shell probing) so run_command runs in the same environment as the
+  // workspace's integrated terminal, including WSL and remote workspaces.
+  const createExecutionEnvironment = (): ExecutionEnvironment => ({
+    hostPlatform: process.platform,
+    ...(vscode.env.remoteName ? { remoteName: vscode.env.remoteName } : {}),
+    terminalShellPath: vscode.env.shell,
+    env: process.env,
+  });
+  const executionManager = new ExecutionManager({
+    environment: createExecutionEnvironment(),
+    logger: { info: (message, logContext) => logger.info(message, logContext ?? {}) },
+  });
   const toolExecutor = new WorkspaceToolExecutor({
     diagnostics: createVSCodeDiagnosticsSource(),
     editor: createVSCodeEditorContextSource(),
     language: createVSCodeLanguageSource(),
     backgroundProcesses,
     webSearch,
+    executionManager,
   });
   const runtimeManager = new RuntimeManager({
     sessionStore,
@@ -110,7 +126,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     transcriptStore,
     diffView,
     providerConfigStore,
+    executionManager,
   });
+
+  // The execution context is cached per workspace; drop it when the workspace
+  // folders or the terminal shell configuration change so no stale environment
+  // is ever reused.
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders(() => executionManager.invalidate()),
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (event.affectsConfiguration("terminal.integrated")) {
+        executionManager.updateEnvironment(createExecutionEnvironment());
+      }
+    }),
+  );
   const messageRouter = new MessageRouter(
     agentManager,
     getWorkspacePath(),

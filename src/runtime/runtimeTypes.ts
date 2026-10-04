@@ -176,6 +176,12 @@ export interface RuntimeSendRequest {
   readonly retry?: boolean;
   /** Current agent mode selecting the available-tool set (defaults to "agent"). */
   readonly mode?: AgentMode;
+  /**
+   * Safe, secret-free summary of the resolved execution environment for this
+   * workspace. Injected into the system prompt so the model knows where
+   * run_command executes without probing the shell itself.
+   */
+  readonly executionContextSummary?: string;
   readonly messages?: readonly RuntimeMessage[];
   readonly signal?: AbortSignal;
   readonly onToolCall?: (

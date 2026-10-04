@@ -19,7 +19,6 @@ export function renderChatView(
   roots.composer.update({
     disabled: !ready || !state.activeSessionId || state.pendingNewConversation,
     running: state.running,
-    canRetry: Boolean(state.lastPrompt) && !state.running && !state.pendingNewConversation,
     readyForInput: ready,
     modelOptions: composerModelOptions(state),
     modelValue: state.selectedModelId,

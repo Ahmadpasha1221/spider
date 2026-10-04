@@ -50,11 +50,11 @@ const messageList = createMessageList(messageListRoot, {
   onRejectChange: (changeId) => postToHost({ type: "RESOLVE_FILE_CHANGE", changeId, decision: "REJECT" }),
   onOpenArtifact: (path) => postToHost({ type: "OPEN_FILE", path }),
   onDeleteMessage: deleteMessage,
+  onSuggest: (prompt) => composer.setPrompt(prompt),
 });
 const composer = createComposer(composerRoot, {
   onSend: handleSend,
   onCancel: cancelRun,
-  onRetry: retryLastPrompt,
   onModelSelect: selectModelFromComposer,
   onToggleAutoApprove: toggleAutoApprove,
 });
@@ -476,22 +476,87 @@ function scheduleUiSync(): void {
 }
 
 function render(): void {
-  runtimePill.textContent = runtimeLabel();
-  settingsBtn.textContent = state.view === "settings" ? "Chat" : "Settings";
-  const showSettings = state.view === "settings";
-  settingsView.hidden = !showSettings;
-  chatView.hidden = showSettings;
+  setTextOnce(runtimePill, runtimeLabel());
+  const settingsOpen = state.view === "settings";
+  // The header buttons are icon-only SVGs: only the pressed state and tooltip
+  // change, never the children — replacing innerHTML/textContent here would
+  // destroy the icon under the pointer (the hover-blink bug).
+  const settingsPressed = String(settingsOpen);
+  if (settingsBtn.getAttribute("aria-pressed") !== settingsPressed) {
+    settingsBtn.setAttribute("aria-pressed", settingsPressed);
+    settingsBtn.classList.toggle("is-active", settingsOpen);
+    settingsBtn.title = settingsOpen ? "Back to chat" : "Settings";
+    settingsBtn.setAttribute("aria-label", settingsOpen ? "Back to chat" : "Open Spider settings");
+  }
+  settingsView.hidden = !settingsOpen;
+  chatView.hidden = settingsOpen;
 
-  if (!showSettings) {
+  if (!settingsOpen) {
+    lastSettingsFingerprint = undefined;
     renderSetupBanner();
-    newSessionBtn.disabled = state.running;
+    if (newSessionBtn.disabled !== state.running) {
+      newSessionBtn.disabled = state.running;
+    }
     renderChatView(
       { composer },
       state,
       {},
     );
   } else {
-    renderSettingsView(providerSettings, authFeedback, state, {
+    renderSettingsViewGuarded();
+  }
+}
+
+/** Write textContent only when it changed: unconditional writes reset hover. */
+function setTextOnce(el: HTMLElement, text: string): void {
+  if (el.textContent !== text) {
+    el.textContent = text;
+  }
+}
+
+/**
+ * Settings rebuild guard. render() runs on every host event burst (including
+ * streaming deltas), and the settings page rebuilds its DOM from scratch —
+ * doing that unconditionally destroyed inputs and buttons while the user
+ * hovered or typed in them, which read as blinking. Rebuild only when the
+ * settings-relevant state actually changed, and restore focus afterwards.
+ */
+let lastSettingsFingerprint: string | undefined;
+function renderSettingsViewGuarded(): void {
+  const fingerprint = JSON.stringify({
+    section: state.settingsSection,
+    provider: state.provider,
+    localProvider: state.localProvider,
+    modelId: state.selectedModelId,
+    modelName: state.selectedModelName,
+    localModels: state.localModels.map((model) => model.id),
+    localLoading: state.localLoading,
+    openRouterModels: state.openRouterModels.slice(0, 200).map((model) => model.id),
+    openRouterFilter: state.openRouterModelFilter,
+    openRouterLoading: state.openRouterLoading,
+    connected: state.runtimeConnected,
+    runtimeError: state.runtimeError,
+    auth: [state.authStatus, state.hasKey, state.connecting, state.authError, state.authMessage],
+    shield: [state.autoApproveEnabled, state.autoApproveScope],
+    rules: state.permissionRules,
+    info: state.extensionInfo,
+  });
+  if (fingerprint === lastSettingsFingerprint) {
+    return;
+  }
+  lastSettingsFingerprint = fingerprint;
+  // Preserve focus (and caret) across the rebuild so typing in the model
+  // filter or an API-key field is never interrupted.
+  const focused = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+  const focusId = focused?.id || undefined;
+  const focusStart = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
+    ? focused.selectionStart
+    : undefined;
+  const focusEnd = focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement
+    ? focused.selectionEnd
+    : undefined;
+  const insideSettings = focusId !== undefined && focused !== undefined && providerSettings.contains(focused);
+  renderSettingsView(providerSettings, authFeedback, state, {
       onProvider: selectProvider,
       onCursorConnect: (apiKey) => {
         state.connecting = true;
@@ -550,6 +615,16 @@ function render(): void {
       onToggleAutoApprove: toggleAutoApprove,
       onSetPermissionRule: setPermissionRule,
     });
+  if (insideSettings && focusId !== undefined) {
+    const restored = providerSettings.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`);
+    restored?.focus();
+    if ((restored instanceof HTMLInputElement || restored instanceof HTMLTextAreaElement) && focusStart !== undefined && focusStart !== null) {
+      try {
+        restored.setSelectionRange(focusStart, focusEnd ?? focusStart);
+      } catch {
+        // Selection restore is best-effort (e.g. password inputs).
+      }
+    }
   }
 }
 
@@ -654,6 +729,14 @@ function renderSetupBanner(): void {
     || state.provider === "mock"
     || (state.provider === "local" && Boolean(state.selectedModelId || state.selectedModelName) && !state.runtimeError)
     || (state.provider === "openrouter" && Boolean(state.selectedModelId) && !state.runtimeError);
+  // Fingerprinted like settings: rebuilding this banner on every event burst
+  // destroyed its button under the pointer.
+  const fingerprint = JSON.stringify({ ready, provider: state.provider, error: state.runtimeError });
+  if (fingerprint === lastSetupBannerFingerprint) {
+    setupBanner.hidden = ready;
+    return;
+  }
+  lastSetupBannerFingerprint = fingerprint;
   setupBanner.hidden = ready;
   if (ready) return;
   setupBanner.replaceChildren();
@@ -670,6 +753,8 @@ function renderSetupBanner(): void {
   button.onclick = () => { state.view = "settings"; render(); };
   setupBanner.append(title, text, button);
 }
+
+let lastSetupBannerFingerprint: string | undefined;
 
 function sendPrompt(prompt: string): void {
   const trimmed = prompt.trim();
@@ -691,15 +776,6 @@ function sendPrompt(prompt: string): void {
   state.messages.push(line);
   messageList.append([line]);
   postToHost({ type: "SEND_PROMPT", prompt: trimmed, sessionId: state.activeSessionId, messageId });
-  scheduleUiSync();
-}
-
-function retryLastPrompt(): void {
-  if (!state.lastPrompt || !state.activeSessionId || state.running || state.pendingNewConversation) return;
-  loadedTranscriptSessionId = state.activeSessionId;
-  state.running = true;
-  state.phase = "submitting";
-  postToHost({ type: "TRY_AGAIN", sessionId: state.activeSessionId });
   scheduleUiSync();
 }
 

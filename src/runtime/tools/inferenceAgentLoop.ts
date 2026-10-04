@@ -87,7 +87,7 @@ export async function runInferenceAgentLoop(
   const allowedTools = availableToolNames(mode);
 
   prepareHistory(history, request.retry === true);
-  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools);
+  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools, request.executionContextSummary);
   history.push({ role: "user", content: request.prompt });
   await emit({ type: "status", sessionId: request.sessionId, status: "RUNNING", timestamp: Date.now() });
 
@@ -298,8 +298,14 @@ function describeToolProblem(call: RuntimeToolCall): string {
   return `The ${call.name} step did not succeed${path ? ` (${path})` : ""}. Deciding what to do next…`;
 }
 
-function ensureSystemPrompt(history: ChatTurn[], modelId: string | undefined, nativeTools: boolean, allowedTools: readonly string[]): void {
-  const base = buildAgentSystemPrompt(modelId);
+function ensureSystemPrompt(
+  history: ChatTurn[],
+  modelId: string | undefined,
+  nativeTools: boolean,
+  allowedTools: readonly string[],
+  executionContextSummary?: string,
+): void {
+  const base = buildAgentSystemPrompt(modelId, executionContextSummary);
   const prompt = nativeTools ? base : `${base}\n\n${buildFallbackToolContract(allowedTools)}`;
   const existing = history.find((turn) => turn.role === "system");
   if (!existing) {

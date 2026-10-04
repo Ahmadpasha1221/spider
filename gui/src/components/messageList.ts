@@ -11,6 +11,8 @@ type MessageListHandlers = {
   onOpenArtifact?: (path: string) => void;
   /** Message Delete: removes it from the UI and conversation persistence. */
   onDeleteMessage?: (messageId: string) => void;
+  /** Empty-state suggestion chip: fills the composer with a starter prompt. */
+  onSuggest?: (prompt: string) => void;
 };
 
 /**
@@ -322,6 +324,17 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       const hint = document.createElement("span");
       hint.textContent = "Ask Spider to explain, debug, refactor, or work on your code.";
       placeholder.append(mark, title, hint);
+      const chips = document.createElement("div");
+      chips.className = "suggest-chips";
+      for (const suggestion of SUGGESTIONS) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className = "suggest-chip";
+        chip.textContent = suggestion.label;
+        chip.addEventListener("click", () => currentHandlers.onSuggest?.(suggestion.prompt));
+        chips.appendChild(chip);
+      }
+      placeholder.appendChild(chips);
       root.appendChild(placeholder);
     } else if (hasLines && empty) {
       empty.remove();
@@ -811,6 +824,13 @@ function fileChangeActions(
 
 /** Finished command output longer than this collapses to a compact block. */
 const COMMAND_COLLAPSE_THRESHOLD = 400;
+
+/** Starter prompts for the empty conversation state. */
+const SUGGESTIONS: ReadonlyArray<{ label: string; prompt: string }> = [
+  { label: "Explain this file", prompt: "Explain what the currently open file does." },
+  { label: "Find bugs", prompt: "Review the currently open file for bugs and suggest fixes." },
+  { label: "Write tests", prompt: "Write tests for the currently open file." },
+];
 
 /**
  * Clipboard write with a legacy textarea fallback: some webview hosts deny
