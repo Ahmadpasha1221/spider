@@ -387,6 +387,55 @@ fallback contract. `isLocalToolName` is the membership test.
   `RegisteredTool.summarize`, execution from the executor, routing from the
   registry.
 
+### Execution environment architecture (2026-10-04)
+The central rule: **workspace location ≠ command execution environment.** A
+workspace path never tells us which OS/shell/environment commands run in.
+`src/runtime/execution/` is the ONE authoritative resolver:
+- `executionTypes.ts` — `ExecutionContext` (`executionType: local|wsl|remote`,
+  `platform: windows|linux|macos|wsl`, `shell`, `backend`, execution-side `cwd`,
+  `env`, `wslDistro?`, `remoteAuthority?`), `ExecutionEnvironment` (host facts),
+  and `ExecutionContextError`.
+- `executionContext.ts` — pure resolvers: platform mapping, shell identity from
+  `vscode.env.shell`, WSL UNC detection/translation
+  (`\\wsl.localhost\<distro>\...` / `\\wsl$\<distro>\...` → `/...`), environment
+  sanitization (defined strings only), and `describeExecutionContext` (a
+  secret-free summary).
+- `executionManager.ts` — `ExecutionManager`: resolves + caches the context per
+  workspace, `invalidate()`/`updateEnvironment()` on workspace or shell change,
+  `resolveCwd(workspace, hostPath)` path translation, `describe(workspace)` for
+  the agent prompt, and `buildCommandInvocation(context, command, cwd)` which
+  produces an **argv-only** launch (`shell: false`) for each backend.
+
+Resolution precedence (VS Code facts only — never `wsl --list`, `which`,
+`find`, `pwd` probing):
+1. `vscode.env.remoteName === "wsl"` → extension host is inside the distro;
+   `executionType: wsl`, `backend: local`, direct spawn (streaming/cancel stay
+   native). Distro from `WSL_DISTRO_NAME`.
+2. Windows host + WSL UNC workspace path → `executionType: wsl`,
+   `backend: wsl`; commands run through
+   `wsl.exe -d <distro> --cd <linuxCwd> -- bash -lc <command>` (argv array, the
+   cwd is never interpolated).
+3. Any other remote authority (`ssh-remote`, `dev-container`, …) →
+   `executionType: remote`, executed in the remote extension host (`backend:
+   local`). `RemoteExecutionBackend` is the designed extension point; it is not
+   needed while the extension host already is the remote environment.
+4. Otherwise → `executionType: local` on the host platform.
+
+Shell selection is context-aware: the terminal shell (`vscode.env.shell`) is
+authoritative for a local/remote host; a WSL bridge ignores the Windows shell
+and uses `bash` inside the distro; platform defaults are cmd (Windows), zsh
+(macOS), bash (Linux/WSL). Windows cmd uses Node's own `/d /s /c` shape and
+PowerShell uses `-NoProfile -Command`; POSIX uses `<shell> -c`.
+`run_command` stays generic: the model expresses WHAT (`run_command({command:
+"bench migrate"})`), Spider decides WHERE/HOW. The safe context summary
+(`type; platform; shell; distro; cwd`) is injected into the system prompt via
+`RuntimeSendRequest.executionContextSummary` so the model never probes the
+environment or prefixes `wsl.exe`/`cmd.exe`/`bash.exe`.
+An unresolvable context throws `ExecutionContextError`, mapped by the executor
+to `dependency_unavailable` — never a silent fallback to another shell.
+The 120 ms `command_output` coalescing, permissions, cancellation, timeouts and
+stdout/stderr streaming are unchanged: only the resolved launch is new.
+
 ### ToolRouter
 `src/runtime/tools/toolRouter.ts` — `route(call, context, authorize, {mode})`:
 availability check (mode-based) → registry validation → permission authorize
@@ -455,8 +504,14 @@ in `extension.ts`). DESTRUCTIVE can never be `allow`. Shape lives in
   security boundary for every file tool.
 - `src/runtime/tools/workspaceToolExecutor.ts` — the actual fs operations.
   Limits: search 50 matches, list 200 entries, skips `.git`, `node_modules`,
-  `dist`, `out`, `.vscode`. `run_command` delegates to
-  `commandRunner.ts` (workspace cwd, timeout, abort support).
+  `dist`, `out`, `.vscode`. `run_command` resolves the host cwd through
+  `resolveWorkspacePathSafe`, asks the injected `ExecutionManager` for the
+  context and the execution-side cwd, then delegates to `commandRunner.ts`
+  (timeout, abort, streaming preserved). `commandRunner.ts` only executes the
+  backend-aware argv launch; it never discovers the environment itself.
+- `src/runtime/execution/` — see "Execution environment architecture" in §5.
+  Local Windows/Linux/macOS, WSL (remote and UNC-bridged) and other remotes
+  all share the single `ExecutionManager` resolution path.
 - `src/runtime/review/fileChangeReviewManager.ts` + `diffView.ts` —
   write/edit mutations are captured (before/after), published as
   `file_change` events, and can be diffed/kept/reverted from the GUI.
@@ -1119,6 +1174,11 @@ compress content). Section state: `AppState.settingsSection`.
 - **Tool execution centralized in ToolRouter + registry** — permission,
   validation, availability, and structured unknown-tool recovery cannot be
   bypassed by any provider.
+- **Workspace location ≠ command execution environment** — exactly one
+  `ExecutionManager` resolves the environment for `run_command`; the
+  `CommandRunner` executes and never discovers/guesses the environment, and no
+  tool inspects the host. Local Windows/Linux, macOS, and WSL (both remote and
+  Windows-UNC-bridged) are supported with argv-only launches.
 - **Registry-generated prompts/schemas** — system-prompt fallback contract
   and native tool schemas are generated from the registry so they can never
   drift from execution.
@@ -1220,6 +1280,15 @@ compress content). Section state: `AppState.settingsSection`.
 
 ## 17. Current Development Status
 
+- **Completed (2026-10-04, execution environment architecture):**
+  `src/runtime/execution/` (types, pure resolvers, `ExecutionManager`,
+  backend-aware `buildCommandInvocation`) resolves commands from VS Code facts
+  instead of probing; `run_command` → `ExecutionManager` → `CommandRunner` is
+  wired into the real tool; WSL (remote and `\\wsl.localhost`-bridged), local
+  Windows/Linux/macOS and other remotes are covered; a safe context summary is
+  injected into the agent prompt; the 120 ms streaming, permissions, timeout
+  and cancellation paths are unchanged. 735 unit tests (24 new execution
+  tests), lint 0 warnings, typecheck + compile green.
 - **Completed (2026-09-25/26):** OpenAI-compatible tool-call id lifecycle +
   regression tests; provider config persistence (+ restore at activation);
   dedicated History page + "History" terminology; Spider rebrand (display
