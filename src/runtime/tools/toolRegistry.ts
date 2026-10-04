@@ -182,12 +182,16 @@ const TOOLS: readonly RegisteredTool[] = [
   }),
   workspaceTool({
     name: "search_files",
-    description: "Search file names and contents in the workspace.",
+    description: "Search file names and contents in the workspace. Respects .gitignore (ignored files are skipped unless includeIgnored is set).",
     permission: "safe",
     category: "search",
     parameters: {
       type: "object",
-      properties: { query: { type: "string" }, path: pathProp },
+      properties: {
+        query: { type: "string" },
+        path: pathProp,
+        includeIgnored: { type: "boolean", description: "Also search .gitignore'd files (default false)." },
+      },
       required: ["query"],
     },
     required: ["query"],
@@ -323,7 +327,7 @@ const TOOLS: readonly RegisteredTool[] = [
   }),
   workspaceTool({
     name: "grep_search",
-    description: "Search file contents with plain text or a regular expression and return matching lines.",
+    description: "Search file contents with plain text or a regular expression and return matching lines. Respects .gitignore (ignored files are skipped unless includeIgnored is set).",
     permission: "safe",
     category: "search",
     parameters: {
@@ -335,6 +339,7 @@ const TOOLS: readonly RegisteredTool[] = [
         caseSensitive: { type: "boolean", description: "Match case exactly." },
         fileGlob: { type: "string", description: "Only search files matching this glob (for example **/*.ts)." },
         maxResults: { type: "number", description: "Maximum matches to return (default 100, maximum 500)." },
+        includeIgnored: { type: "boolean", description: "Also search .gitignore'd files (default false)." },
       },
       required: ["query"],
     },
@@ -347,7 +352,7 @@ const TOOLS: readonly RegisteredTool[] = [
   }),
   workspaceTool({
     name: "glob_search",
-    description: "Find workspace files by glob pattern (for example src/**/*.ts) and return their paths.",
+    description: "Find workspace files by glob pattern (for example src/**/*.ts) and return their paths. Respects .gitignore (ignored files are skipped unless includeIgnored is set).",
     permission: "safe",
     category: "search",
     parameters: {
@@ -356,6 +361,7 @@ const TOOLS: readonly RegisteredTool[] = [
         pattern: { type: "string", description: "Glob pattern, relative to the workspace root." },
         path: { type: "string", description: "Directory to search, relative to the workspace root." },
         maxResults: { type: "number", description: "Maximum paths to return (default 200, maximum 2000)." },
+        includeIgnored: { type: "boolean", description: "Also match .gitignore'd files (default false)." },
       },
       required: ["pattern"],
     },
@@ -726,13 +732,13 @@ const TOOLS: readonly RegisteredTool[] = [
   // ---- Network (Phase 3) -----------------------------------------------
   workspaceTool({
     name: "fetch_url",
-    description: "Retrieve the contents of one specific https URL. This is not a web search; you must supply the URL.",
+    description: "Retrieve the contents of one specific URL (https, or http for localhost loopback dev servers). This is not a web search; you must supply the URL.",
     permission: "external",
     category: "network",
     parameters: {
       type: "object",
       properties: {
-        url: { type: "string", description: "Absolute https URL to retrieve." },
+        url: { type: "string", description: "Absolute URL to retrieve (https, or http://localhost… for a local dev server)." },
         maxBytes: {
           type: "number",
           description: `Maximum response bytes to read (default ${fetchUrlTool.FETCH_LIMITS.defaultMaxBytes}, maximum ${fetchUrlTool.FETCH_LIMITS.maxBytesLimit}).`,
@@ -751,8 +757,8 @@ const TOOLS: readonly RegisteredTool[] = [
       if (!url) {
         return "Missing required argument: url";
       }
-      if (!/^https:\/\//i.test(url)) {
-        return "Only https URLs are supported.";
+      if (!/^https?:\/\//i.test(url)) {
+        return "Only https URLs are supported (http for localhost loopback only).";
       }
       return undefined;
     },
@@ -805,7 +811,7 @@ const TOOLS: readonly RegisteredTool[] = [
   }),
   workspaceTool({
     name: "codebase_search",
-    description: "Find relevant code regions by intent across the workspace (use grep_search for exact text or regex).",
+    description: "Find relevant code regions by intent across the workspace (use grep_search for exact text or regex). Lexical term-coverage ranking over .gitignore-respected sources — not embedding search.",
     permission: "safe",
     category: "search",
     parameters: {
@@ -816,6 +822,7 @@ const TOOLS: readonly RegisteredTool[] = [
           type: "number",
           description: `Maximum regions (default ${CODEBASE_SEARCH_LIMITS.defaultResults}, maximum ${CODEBASE_SEARCH_LIMITS.maxResults}).`,
         },
+        includeIgnored: { type: "boolean", description: "Also scan .gitignore'd files (default false)." },
       },
       required: ["query"],
     },
@@ -829,7 +836,7 @@ const TOOLS: readonly RegisteredTool[] = [
   }),
   workspaceTool({
     name: "repo_map",
-    description: "Show the repository structure as a compact directory tree.",
+    description: "Show the repository structure as a compact directory tree. Respects .gitignore (ignored paths are hidden unless includeIgnored is set).",
     permission: "safe",
     category: "filesystem",
     parameters: {
@@ -840,6 +847,7 @@ const TOOLS: readonly RegisteredTool[] = [
           description: `Directory depth (default ${REPO_MAP_LIMITS.defaultDepth}, maximum ${REPO_MAP_LIMITS.maxDepth}).`,
         },
         path: pathProp,
+        includeIgnored: { type: "boolean", description: "Also show .gitignore'd paths (default false)." },
       },
     },
     exampleArguments: { depth: 3 },
@@ -1003,21 +1011,23 @@ const TOOLS: readonly RegisteredTool[] = [
   }),
   workspaceTool({
     name: "run_tests",
-    description: `Run the project's test suite with an approved runner (${[...APPROVED_TEST_RUNNERS].sort().join(", ")}) and a bounded timeout (default ${TEST_RUN_LIMITS.defaultTimeoutMs / 1000}s, max ${TEST_RUN_LIMITS.maxTimeoutMs / 1000}s).`,
+    description: `Run the project's test suite with an approved runner (${[...APPROVED_TEST_RUNNERS].sort().join(", ")}) and a bounded timeout (default ${TEST_RUN_LIMITS.defaultTimeoutMs / 1000}s, max ${TEST_RUN_LIMITS.maxTimeoutMs / 1000}s). Target a file with path and/or a test name with filter (translated to runner argv); or pass raw argv via args — not both.`,
     permission: "execute",
     category: "terminal",
     parameters: {
       type: "object",
       properties: {
         runner: { type: "string", enum: [...APPROVED_TEST_RUNNERS].sort(), description: "Approved test runner executable." },
-        args: { type: "array", items: { type: "string" }, description: "Runner arguments (argv entries, never a shell string)." },
+        args: { type: "array", items: { type: "string" }, description: "Runner arguments (argv entries, never a shell string). Mutually exclusive with path/filter." },
+        path: { type: "string", description: "Workspace-relative test file or directory to run (translated to runner argv)." },
+        filter: { type: "string", description: "Test-name pattern (pytest -k, js -t, go -run, cargo positional). Mutually exclusive with args." },
         cwd: pathProp,
         timeoutMs: { type: "number", description: `Timeout (default ${TEST_RUN_LIMITS.defaultTimeoutMs}, maximum ${TEST_RUN_LIMITS.maxTimeoutMs}).` },
       },
       required: ["runner"],
     },
     required: ["runner"],
-    exampleArguments: { runner: "pnpm", args: ["run", "test"], timeoutMs: 120000 },
+    exampleArguments: { runner: "pytest", path: "tests/test_agent.py", filter: "streaming" },
     validate: (input) => {
       if (typeof input.runner !== "string" || input.runner.trim().length === 0) {
         return "Missing required argument: runner";

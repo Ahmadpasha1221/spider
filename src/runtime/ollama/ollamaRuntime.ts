@@ -1,6 +1,7 @@
 import {
   AgentRuntime,
   OllamaRuntimeConfig,
+  RestoredHistoryTurn,
   RuntimeAvailability,
   RuntimeCancelRequest,
   RuntimeError,
@@ -137,7 +138,7 @@ export class OllamaRuntime implements AgentRuntime {
     await runInferenceAgentLoop(
       request,
       history,
-      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta),
+      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta, request.usageDeltaSink),
       emit,
       { nativeTools, mode: request.mode },
     );
@@ -165,6 +166,18 @@ export class OllamaRuntime implements AgentRuntime {
 
   async cancel(_request: RuntimeCancelRequest): Promise<void> {}
 
+  restoreHistory(sessionId: string, turns: readonly RestoredHistoryTurn[]): boolean {
+    const history = this.histories.get(sessionId);
+    if (history && history.length > 0) {
+      return false;
+    }
+    this.histories.set(
+      sessionId,
+      turns.map((turn) => ({ role: turn.role, content: turn.content })),
+    );
+    return true;
+  }
+
   dispose(): void {
     this.histories.clear();
   }
@@ -176,6 +189,7 @@ export class OllamaRuntime implements AgentRuntime {
     toolsEnabled = false,
     mode?: AgentMode,
     onDelta?: (text: string) => void,
+    onUsage?: (usage: RuntimeUsage) => void,
   ) {
     const payload: Record<string, unknown> = {
       model: modelId,
@@ -229,6 +243,9 @@ export class OllamaRuntime implements AgentRuntime {
         const chunkUsage = extractOllamaUsage(chunk);
         if (chunkUsage) {
           usage = chunkUsage;
+          // Ollama reports totals on the final NDJSON line; surface them live
+          // too. The returned completion usage stays authoritative.
+          onUsage?.(chunkUsage);
         }
       }
     } catch (error) {

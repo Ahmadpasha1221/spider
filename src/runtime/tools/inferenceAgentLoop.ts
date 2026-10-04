@@ -10,6 +10,12 @@ import { parseFallbackToolOutput } from "./textToolFallback";
 import { parseNativeToolOutput, type InvalidToolMention, type ParsedToolOutput } from "./parseToolCalls";
 import { availableToolNames, DEFAULT_AGENT_MODE, type AgentMode } from "./toolAvailability";
 import { buildFallbackToolContract, getRegisteredTool } from "./toolRegistry";
+import {
+  compactChatTurns,
+  DEFAULT_CONTEXT_BUDGET_TOKENS,
+  type CompactionInfo,
+  type ContextBudget,
+} from "./contextManager";
 
 export interface ChatToolCall {
   id: string;
@@ -54,6 +60,16 @@ export interface AgentLoopOptions {
    * without any changes to the loop itself.
    */
   readonly mode?: AgentMode;
+  /**
+   * Ceiling for one provider request (estimated tokens). The stored history
+   * is never mutated — compaction only narrows the view handed to
+   * `completeChat`, keeping the system turn, the latest prompt, and every
+   * assistant tool-call/result pair atomic. Defaults to
+   * DEFAULT_CONTEXT_BUDGET_TOKENS; normal runs never reach it.
+   */
+  readonly contextBudget?: ContextBudget;
+  /** Observability hook: fired whenever a request view was actually compacted. */
+  readonly onCompaction?: (info: CompactionInfo) => void;
 }
 
 /**
@@ -91,8 +107,19 @@ export async function runInferenceAgentLoop(
   history.push({ role: "user", content: request.prompt });
   await emit({ type: "status", sessionId: request.sessionId, status: "RUNNING", timestamp: Date.now() });
 
+  // The model sees a budgeted view of the stored history (system + recent
+  // tail, tool-call pairs kept atomic). `history` itself stays complete.
+  const budget = options.contextBudget ?? { maxTokens: DEFAULT_CONTEXT_BUDGET_TOKENS };
+  const modelView = (): ChatTurn[] => {
+    const { turns, info } = compactChatTurns(history, budget);
+    if (info.compacted) {
+      options.onCompaction?.(info);
+    }
+    return turns;
+  };
+
   if (!request.onToolCall) {
-    const completion = await completeChat(history, request.signal);
+    const completion = await completeChat(modelView(), request.signal);
     if (completion.usage) {
       onUsage(completion.usage);
     }
@@ -116,7 +143,7 @@ export async function runInferenceAgentLoop(
 
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
     throwIfAborted(request.signal);
-    const completion = await completeChat(history, request.signal);
+    const completion = await completeChat(modelView(), request.signal);
     if (completion.usage) {
       onUsage(completion.usage);
     }

@@ -1,6 +1,7 @@
 import {
   AgentRuntime,
   OpenAICompatibleRuntimeConfig,
+  RestoredHistoryTurn,
   RuntimeAvailability,
   RuntimeCancelRequest,
   RuntimeError,
@@ -147,7 +148,7 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
     await runInferenceAgentLoop(
       request,
       history,
-      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta),
+      (messages, signal) => this.completeChat(modelId, messages, signal, nativeTools, request.mode, streamDelta, request.usageDeltaSink),
       emit,
       { nativeTools, mode: request.mode },
     );
@@ -164,7 +165,7 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
     this.histories.clear();
   }
 
-  private async completeChat(modelId: string, messages: readonly ChatTurn[], signal?: AbortSignal, nativeTools = true, mode?: AgentMode, onDelta?: (text: string) => void) {
+  private async completeChat(modelId: string, messages: readonly ChatTurn[], signal?: AbortSignal, nativeTools = true, mode?: AgentMode, onDelta?: (text: string) => void, onUsage?: (usage: RuntimeUsage) => void) {
     const response = await this.request("/chat/completions", {
       method: "POST",
       signal,
@@ -179,6 +180,10 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
         // shared stream gate; the assembled completion still flows through the
         // same agent-loop parsing as non-streamed responses.
         stream: Boolean(onDelta),
+        // Ask for the terminal usage chunk while streaming; without it most
+        // providers omit usage from SSE entirely (streaming usage arrives via
+        // onUsage, the terminal value stays authoritative).
+        ...(onDelta ? { stream_options: { include_usage: true } } : {}),
         ...(nativeTools ? { tools: nativeChatTools(availableToolNames(mode)) } : {}),
       }),
     });
@@ -188,7 +193,7 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
     }
 
     if (onDelta) {
-      return consumeOpenAiSseStream(response, signal, onDelta);
+      return consumeOpenAiSseStream(response, signal, onDelta, onUsage);
     }
 
     const payload = (await response.json()) as {
@@ -227,6 +232,18 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
       return this.histories.get(sessionId) as ChatTurn[];
     }
     return history;
+  }
+
+  restoreHistory(sessionId: string, turns: readonly RestoredHistoryTurn[]): boolean {
+    const history = this.histories.get(sessionId);
+    if (history && history.length > 0) {
+      return false;
+    }
+    this.histories.set(
+      sessionId,
+      turns.map((turn) => ({ role: turn.role, content: turn.content })),
+    );
+    return true;
   }
 
   /** Current API key (never log the returned value). */

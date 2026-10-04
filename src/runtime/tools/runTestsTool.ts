@@ -42,6 +42,10 @@ export interface RunTestsResult {
   readonly args: readonly string[];
   readonly command: string;
   readonly cwd: string;
+  /** Workspace-relative test path requested, if any. */
+  readonly path?: string;
+  /** Test-name filter requested, if any. */
+  readonly filter?: string;
   readonly passed: boolean;
   readonly exitCode: number | null;
   readonly durationMs: number;
@@ -71,7 +75,18 @@ export async function runTests(
 ): Promise<RunTestsResult> {
   const startedAt = Date.now();
   const runner = parseRunner(input.runner);
-  const args = parseArgs(input.args);
+  const rawArgs = parseArgs(input.args);
+  const testPath = await parseTestPath(input.path, context.workspacePath);
+  const filter = parseFilter(input.filter);
+  // Targeted runs (path/filter) and raw argv are mutually exclusive: mixing
+  // them would let flag ordering silently change what the runner selects.
+  if (rawArgs.length > 0 && (testPath !== undefined || filter !== undefined)) {
+    throw new ToolExecutionError(
+      "invalid_input",
+      "Pass either args or path/filter, not both: path and filter are translated into runner argv for you.",
+    );
+  }
+  const args = buildTargetArgs(runner, rawArgs, testPath, filter);
   const cwd = await parseCwd(input.cwd, context.workspacePath);
   const timeoutMs = parseTimeout(input.timeoutMs);
   if (context.signal?.aborted) {
@@ -119,6 +134,8 @@ export async function runTests(
     args,
     command: [runner, ...args].join(" "),
     cwd: toWorkspaceRelativeCwd(context.workspacePath, cwd),
+    ...(testPath !== undefined ? { path: toWorkspaceRelativeCwd(context.workspacePath, testPath) } : {}),
+    ...(filter !== undefined ? { filter } : {}),
     passed: !timedOut && !cancelled && exitCode === 0,
     exitCode,
     durationMs: Date.now() - startedAt,
@@ -188,6 +205,118 @@ export async function parseCwd(value: unknown, workspacePath: string): Promise<s
     throw new ToolExecutionError("not_found", `cwd does not exist: ${value}`);
   }
   return resolved;
+}
+
+/**
+ * Targeted test path: a workspace-relative file or directory that must exist.
+ * Returned absolute (execution-side); echoed workspace-relative in the result.
+ */
+export async function parseTestPath(value: unknown, workspacePath: string): Promise<string | undefined> {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new ToolExecutionError("invalid_input", "path must be a workspace-relative file or directory.");
+  }
+  if (value.trim().startsWith("-")) {
+    throw new ToolExecutionError("invalid_input", "path must not start with '-'.");
+  }
+  const resolved = await resolveWorkspacePathSafe(workspacePath, value);
+  if (!(await pathExists(resolved))) {
+    throw new ToolExecutionError("not_found", `Test path does not exist: ${value}`);
+  }
+  return resolved;
+}
+
+/** Test-name filter: a runner-native pattern (`-k`, `-t`, `-run`, …). */
+export function parseFilter(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ToolExecutionError("invalid_input", "filter must be a non-empty string.");
+  }
+  const filter = value.trim();
+  if (filter.length > 200) {
+    throw new ToolExecutionError("invalid_input", "filter must be at most 200 characters.");
+  }
+  return filter;
+}
+
+/**
+ * Translates a targeted request into runner-native argv (still argv-only, no
+ * shell). Runners that cannot express a path or filter combination fail with
+ * guidance instead of a silently wrong selection.
+ */
+export function buildTargetArgs(runner: string, rawArgs: readonly string[], testPath: string | undefined, filter: string | undefined): string[] {
+  const name = runner.toLowerCase();
+  if (testPath === undefined && filter === undefined) {
+    return [...rawArgs];
+  }
+  const forbidArgs = (): void => {
+    if (rawArgs.length > 0) {
+      throw new ToolExecutionError(
+        "invalid_input",
+        "Pass either args or path/filter, not both: path and filter are translated into runner argv for you.",
+      );
+    }
+  };
+  // (The caller already enforces this; the per-runner check keeps the
+  // function safe when used directly.)
+  forbidArgs();
+  switch (name) {
+    case "pytest": {
+      const targeted: string[] = [];
+      if (testPath !== undefined) {
+        targeted.push(testPath);
+      }
+      if (filter !== undefined) {
+        targeted.push("-k", filter);
+      }
+      return targeted;
+    }
+    case "python":
+    case "python3": {
+      if (filter !== undefined) {
+        throw new ToolExecutionError(
+          "invalid_input",
+          `Runner ${runner} cannot filter by test name; use runner "pytest" with filter instead.`,
+        );
+      }
+      return testPath !== undefined ? [testPath] : [];
+    }
+    case "pnpm":
+    case "npm":
+    case "yarn": {
+      const targeted = ["test", "--"];
+      if (testPath !== undefined) {
+        targeted.push(testPath);
+      }
+      if (filter !== undefined) {
+        targeted.push("-t", filter);
+      }
+      return targeted;
+    }
+    case "cargo": {
+      if (testPath !== undefined) {
+        throw new ToolExecutionError(
+          "invalid_input",
+          'Runner "cargo" selects test targets by name, not by path; pass the test name as filter instead.',
+        );
+      }
+      return filter !== undefined ? ["test", filter] : ["test"];
+    }
+    case "go": {
+      const targeted = ["test"];
+      if (filter !== undefined) {
+        targeted.push("-run", filter);
+      }
+      targeted.push(testPath ?? "./...");
+      return targeted;
+    }
+    default:
+      throw new ToolExecutionError("invalid_input", `Unsupported test runner: ${runner}.`);
+  }
 }
 
 export function parseTimeout(value: unknown): number {

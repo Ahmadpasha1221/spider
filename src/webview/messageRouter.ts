@@ -373,6 +373,8 @@ export class MessageRouter {
           completionTokens: event.usage.completionTokens,
           totalTokens: event.usage.totalTokens,
           ...(event.usage.costUsd !== undefined ? { costUsd: event.usage.costUsd } : {}),
+          // Live snapshots while streaming (display-only); final totals omit it.
+          ...(event.partial ? { partial: true as const } : {}),
         };
       case "file_change":
         return { type: "FILE_CHANGE", change: toFileChangeView(event.change) };

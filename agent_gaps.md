@@ -62,53 +62,72 @@ editor History tab. At minimum the chat should link to it.
 
 ---
 
-## B. Engine / agent-loop gaps
+## B. Engine / agent-loop gaps — **status after 2026-10-04 engine pass**
 
-### B1. `codebase_search` is lexical, not semantic — **incomplete**
+### B1. `codebase_search` is lexical, not semantic — **incomplete (intentional)**
 Query-term coverage over line chunks. No embeddings, no symbol-aware ranking.
-Works as a stopgap but users should not be told it's "codebase search"
-without qualification. Settings already admits no indexing.
+The registry description now says so honestly ("Lexical term-coverage
+ranking … — not embedding search"). Phase 1 (gitignore-respected sources via
+B2) done; embedding/index Phase 2 deferred — needs an indexing design, not
+more ranking tweaks. Symbol search already exists separately (`list_symbols`
+via editor providers).
 
-### B2. Tool search ignores `.gitignore` and uses no native backend — **incomplete**
-Walker + hardcoded ignore set. Monorepos with generated code, fixtures, and
-vendored deps will produce noisy results. ripgrep should be the default
-backend (it's what every editor already ships).
+### B2. Tool search ignores `.gitignore` and uses no native backend — **PARTIALLY FIXED**
+`gitignore.ts` + shared walker + `repo_map` now honor root/per-directory
+`.gitignore` (negation, dir-only, anchored, `**`) with `includeIgnored`
+escape hatch on `search_files`/`grep_search`/`glob_search`/`codebase_search`/
+`repo_map`; hardcoded denylist kept as safety floor. Still in-process — no
+ripgrep: native search needs execution-environment routing (WSL/remote) and
+is a separate design, not a drop-in.
 
-### B3. In-runtime model history is memory-only — **by design, still a gap**
-After restart the session continues with empty model history while the
-transcript UI looks full. The model silently "forgets" everything. Real
-agents persist a compacted history. Your design comment says "zero tokens by
-design" — the design is defensible for cost, but the UX consequence
-(transcript looks intact, model has no memory) is not communicated anywhere in
-the UI.
+### B3. In-runtime model history is memory-only — **FIXED (deterministic restore)**
+`contextRestore.ts` rebuilds text-only user/assistant turns (capped,
+budget-compacted); `AgentRuntime.restoreHistory` seeds providers once per
+session into empty histories only; tool history is never replayed (no ids to
+pair). The model continues from readable conversation after restart — no
+silent amnesia, no fabricated tool calls.
 
-### B4. `fetch_url` rejects http:// outright, including localhost — **deliberate, but incomplete**
-Blocks local dev servers forever "until an explicit local-network policy
-exists". That policy should exist. Today the agent cannot read your own
-`http://localhost:3000` error page — a very common debugging need.
+### B4. `fetch_url` rejects http:// outright, including localhost — **FIXED (policy)**
+`LocalNetworkPolicy.allowLocalNetwork` permits http(s) loopback
+(`localhost`, `127/8`, `::1`); LAN/metadata/non-loopback-http stay blocked
+per hop including redirects. Still `external`-permission gated. DNS-rebind
+TOCTOU documented as residual risk.
 
-### B5. `search_web` returns snippets only, needs a key, no provider abstraction beyond Brave-compatible — **incomplete**
-No fallback, no page-body fetch of results (agent must guess URLs).
+### B5. `search_web` returns snippets only, needs a key, no provider abstraction beyond Brave-compatible — **incomplete (deferred)**
+The `WebSearchProvider` interface itself is clean; what's missing is
+multi-provider fallback and snippet→page pipeline beyond the manual
+`fetch_url` step the tool description already guides. Needs a provider-config
+design (where fallback credentials live) before code.
 
-### B6. No streaming `usage`/cost feedback — **missing**
-SSE stream merges tool fragments but nothing live-updates tokens/cost during
-a run.
+### B6. No streaming `usage`/cost feedback — **FIXED (live display, final totals)**
+Streams send `stream_options.include_usage`; cumulative snapshots flow as
+partial `usage` events (display-only) while terminal usage stays
+authoritative and is the only thing accumulated. Same `AGENT_USAGE` message
+(+`partial` flag) — no second event system. `costUsd` still uncomputed
+(OpenRouter pricing is catalog-only) — next step, not this pass.
 
-### B7. `run_tests` capped at 300 s, no per-test filter contract — **incomplete**
-Workaround exists (`background_command`), but a `--grep`-style passthrough
-contract should be formalized.
+### B7. `run_tests` capped at 300 s, no per-test filter contract — **FIXED (contract)**
+Formal `path`/`filter` contract mutually exclusive with raw `args`,
+translated per runner (`buildTargetArgs`: pytest `-k`, js `-t`, go `-run`,
+cargo positional; unsupported combos fail with guidance, never silently
+wrong). Timeout cap deliberately unchanged.
 
-### B8. Language tools are editor-provider-dependent — **incomplete**
-Without a language extension everything is `dependency_unavailable`. No
-tree-sitter fallback. Acceptable tradeoff, but undocumented to users.
+### B8. Language tools are editor-provider-dependent — **incomplete (deferred)**
+`dependency_unavailable` with explanation is the correct graceful behavior
+today. A structural fallback needs a parser dependency (tree-sitter native
+module across win/mac/linux + WSL) — packaging decision first, code second.
 
-### B9. GitHub/remote integration absent — `git_show`/`git_blame` local-only, no PR/issue context — **missing**
+### B9. GitHub/remote integration absent — `git_show`/`git_blame` local-only, no PR/issue context — **missing (deferred, P2)**
+Needs a `RemoteGit` abstraction separate from local tools + credential home
+(`ProviderCredentialStore` per-profile pattern is the natural fit). No code
+this pass.
 
-### B10. No conversation compaction strategy — **missing**
-History grows unboundedly in the runtime map; no summarization/truncation
-policy before the context window overflows. Context window limits from the
-catalog are read for display but not enforced for history trimming (no
-evidence of trimming logic in the loop).
+### B10. No conversation compaction strategy — **FIXED (budgeted view)**
+`contextManager.ts`: stored history stays complete; every `completeChat`
+receives a budgeted view (default 100k est. tokens @ ~4 chars/token):
+system + latest prompt always kept, tool-call/result pairs atomic, oldest
+dropped first, `onCompaction` hook for observability. Normal runs never
+trigger it — protection only, no summarizer hallucinations.
 
 ---
 

@@ -122,7 +122,13 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
           ...(context.signal ? { signal: context.signal } : {}),
         });
       case "search_files":
-        return this.searchFiles(workspacePath, requiredString(input, "query"), stringField(input, "path") ?? ".", context.signal);
+        return this.searchFiles(
+          workspacePath,
+          requiredString(input, "query"),
+          stringField(input, "path") ?? ".",
+          context.signal,
+          input.includeIgnored === true,
+        );
       case "grep_search":
         return grepSearch(input, {
           workspacePath,
@@ -294,6 +300,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     query: string,
     requested: string,
     signal?: AbortSignal,
+    includeIgnored = false,
   ): Promise<unknown> {
     const root = await resolveWorkspacePathSafe(workspacePath, requested);
     const matches: Array<{ path: string; line: number; text: string }> = [];
@@ -331,6 +338,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
       // Preserved from the legacy implementation: results are always
       // workspace-relative, even when the search is narrowed to a subfolder.
       relativeTo: workspacePath,
+      includeIgnored,
     });
 
     if (walk.truncated) {

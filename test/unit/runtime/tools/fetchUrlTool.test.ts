@@ -51,16 +51,24 @@ describe("fetch_url", () => {
     await expect(run({ url: "https://user:pass@example.com" }, fetchFn)).rejects.toMatchObject({ code: "invalid_input" });
   });
 
-  it("blocks loopback, private and metadata targets", async () => {
-    const fetchFn = fetchWith(new Response("secret"));
-    await expect(run({ url: "https://localhost/admin" }, fetchFn)).rejects.toMatchObject({ code: "security_rejected" });
-    await expect(run({ url: "https://127.0.0.1/" }, fetchFn)).rejects.toMatchObject({ code: "security_rejected" });
+  it("blocks private and metadata targets but allows loopback under policy", async () => {
+    // Fresh body per request: a Response stream can only be read once.
+    const fetchFn = fetchWith(() => new Response("secret", { headers: { "content-type": "text/plain" } }));
+    // Loopback is reachable: local dev servers are an approved destination
+    // (the tool's external permission still gates each request).
+    await expect(run({ url: "https://localhost/admin" }, fetchFn)).resolves.toMatchObject({ content: "secret" });
+    await expect(run({ url: "https://127.0.0.1/" }, fetchFn)).resolves.toMatchObject({ content: "secret" });
+    await expect(run({ url: "http://localhost:3000/status" }, fetchFn)).resolves.toMatchObject({ content: "secret" });
+    // Private, link-local and metadata ranges stay unreachable.
+    await expect(run({ url: "https://192.168.1.10/" }, fetchFn)).rejects.toMatchObject({ code: "security_rejected" });
     await expect(run({ url: "https://169.254.169.254/latest/meta-data/" }, fetchFn)).rejects.toMatchObject({
       code: "security_rejected",
     });
     await expect(run({ url: "https://metadata.google.internal/" }, fetchFn)).rejects.toMatchObject({
       code: "security_rejected",
     });
+    // Plain http outside loopback is still rejected.
+    await expect(run({ url: "http://example.com/" }, fetchFn)).rejects.toMatchObject({ code: "invalid_input" });
   });
 
   it("blocks a hostname that resolves to a private address", async () => {
@@ -87,10 +95,23 @@ describe("fetch_url", () => {
   });
 
   it("rejects a redirect that targets a private address", async () => {
-    const fetchFn = fetchWith(new Response(null, { status: 302, headers: { location: "https://127.0.0.1/" } }));
+    const fetchFn = fetchWith(new Response(null, { status: 302, headers: { location: "https://169.254.169.254/" } }));
     await expect(run({ url: "https://example.com/start" }, fetchFn)).rejects.toMatchObject({
       code: "security_rejected",
     });
+  });
+
+  it("allows a redirect onto loopback under the local policy", async () => {
+    let calls = 0;
+    const fetchFn = fetchWith(() => {
+      calls += 1;
+      return calls === 1
+        ? new Response(null, { status: 302, headers: { location: "http://localhost:3000/final" } })
+        : new Response("local", { status: 200, headers: { "content-type": "text/plain" } });
+    });
+    const result = await run({ url: "https://example.com/start" }, fetchFn);
+    expect(result.url).toBe("http://localhost:3000/final");
+    expect(result.content).toBe("local");
   });
 
   it("rejects a redirect loop after the maximum", async () => {

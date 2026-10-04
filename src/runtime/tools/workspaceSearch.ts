@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isInsideWorkspace } from "./workspacePath";
+import { isIgnoredByGitignore, parseGitignore, type GitignoreRule } from "./gitignore";
 import { ToolExecutionError } from "./toolError";
 
 /**
@@ -52,6 +53,9 @@ export const SEARCH_LIMITS = {
   maxDepth: 32,
 } as const;
 
+/** A single .gitignore file larger than this is skipped (never read fully). */
+export const MAX_GITIGNORE_BYTES = 64_000;
+
 /** First-NUL-byte heuristic: the standard cheap binary-file test. */
 export function isProbablyBinary(buffer: Buffer): boolean {
   const sample = buffer.subarray(0, 8_000);
@@ -81,6 +85,17 @@ export interface WalkWorkspaceOptions {
    * workspace-relative, even when the search is narrowed to a subdirectory.
    */
   readonly relativeTo?: string;
+  /**
+   * Honor `.gitignore` files (workspace root plus one per directory).
+   * Defaults to true: ignored paths are skipped like the hardcoded denylist.
+   */
+  readonly respectGitignore?: boolean;
+  /**
+   * Escape hatch for explicitly searching ignored files (`.env`, build
+   * output). Defaults to false. The hardcoded generated-directory denylist
+   * still applies — it is a safety/performance floor, not user config.
+   */
+  readonly includeIgnored?: boolean;
 }
 
 export interface WalkWorkspaceResult {
@@ -108,10 +123,69 @@ export async function walkWorkspace(
   const relativeRoot = path.resolve(options.relativeTo ?? workspacePath);
   const maxEntries = options.maxEntries ?? Number.MAX_SAFE_INTEGER;
   const maxDepth = options.maxDepth ?? SEARCH_LIMITS.maxDepth;
+  const respectGitignore = options.respectGitignore ?? true;
+  const includeIgnored = options.includeIgnored ?? false;
   let scannedFiles = 0;
   let scannedEntries = 0;
   let truncated = false;
   let cancelled = false;
+
+  // `.gitignore` rules accumulate as the walk descends: the workspace-root
+  // file first, then one per directory. Later (deeper) rules override earlier
+  // ones, matching git's own precedence.
+  const ignoreRules: GitignoreRule[] = [];
+  const ignoreLoadedDirs = new Set<string>();
+  const loadIgnoreFile = async (absoluteDir: string): Promise<void> => {
+    if (!respectGitignore || includeIgnored) {
+      return;
+    }
+    const scope = toPosixRelative(relativeRoot, absoluteDir);
+    if (scope.startsWith("..") || ignoreLoadedDirs.has(scope)) {
+      return;
+    }
+    ignoreLoadedDirs.add(scope);
+    let content: string;
+    try {
+      const stats = await fs.stat(path.join(absoluteDir, ".gitignore"));
+      if (!stats.isFile() || stats.size > MAX_GITIGNORE_BYTES) {
+        return;
+      }
+      content = await fs.readFile(path.join(absoluteDir, ".gitignore"), "utf8");
+    } catch {
+      return;
+    }
+    ignoreRules.push(...parseGitignore(content, scope === "." ? "" : scope));
+  };
+  /**
+   * Ancestor ignore files apply to everything beneath them: when the walk is
+   * narrowed to a subdirectory, the workspace-root (and intermediate)
+   * `.gitignore` files still govern it. Loaded outermost-first so deeper
+   * rules override shallower ones.
+   */
+  const loadAncestorIgnoreFiles = async (absoluteRoot: string): Promise<void> => {
+    if (!respectGitignore || includeIgnored) {
+      return;
+    }
+    const rel = toPosixRelative(relativeRoot, absoluteRoot);
+    if (rel === "." || rel.startsWith("..")) {
+      return;
+    }
+    const segments = rel.split("/");
+    let current = relativeRoot;
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      current = path.join(current, segments[index] ?? "");
+      await loadIgnoreFile(current);
+    }
+  };
+  const isIgnored = (relativePath: string, isDirectory: boolean): boolean => {
+    if (!respectGitignore || includeIgnored || ignoreRules.length === 0) {
+      return false;
+    }
+    return isIgnoredByGitignore(ignoreRules, relativePath, isDirectory);
+  };
+
+  await loadIgnoreFile(root);
+  await loadAncestorIgnoreFiles(root);
 
   async function walk(current: string, depth: number): Promise<boolean> {
     if (options.signal?.aborted) {
@@ -130,6 +204,8 @@ export async function walkWorkspace(
       return true;
     }
     entries.sort((left, right) => left.name.localeCompare(right.name));
+    // This directory's own .gitignore governs everything beneath it.
+    await loadIgnoreFile(current);
 
     for (const entry of entries) {
       if (options.signal?.aborted) {
@@ -146,7 +222,7 @@ export async function walkWorkspace(
       const relativePath = toPosixRelative(relativeRoot, absolutePath);
 
       if (entry.isDirectory()) {
-        if (isIgnoredDirectoryName(entry.name)) {
+        if (isIgnoredDirectoryName(entry.name) || isIgnored(relativePath, true)) {
           continue;
         }
         if (!(await walk(absolutePath, depth + 1))) {
@@ -163,10 +239,17 @@ export async function walkWorkspace(
         }
         const stats = await safeStat(real);
         if (stats?.isDirectory()) {
-          if (!isIgnoredDirectoryName(entry.name) && !(await walk(real, depth + 1))) {
+          if (
+            !isIgnoredDirectoryName(entry.name)
+            && !isIgnored(relativePath, true)
+            && !(await walk(real, depth + 1))
+          ) {
             return false;
           }
         } else if (stats?.isFile()) {
+          if (isIgnored(relativePath, false)) {
+            continue;
+          }
           scannedFiles += 1;
           if (!(await onFile({ absolutePath, relativePath }))) {
             return false;
@@ -176,6 +259,9 @@ export async function walkWorkspace(
       }
 
       if (!entry.isFile()) {
+        continue;
+      }
+      if (isIgnored(relativePath, false)) {
         continue;
       }
       scannedFiles += 1;
