@@ -103,7 +103,7 @@ export async function runInferenceAgentLoop(
   const allowedTools = availableToolNames(mode);
 
   prepareHistory(history, request.retry === true);
-  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools, request.executionContextSummary, request.rulesContext);
+  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools, request.executionContextSummary, request.rulesContext, request.systemPrompt);
   history.push({ role: "user", content: request.prompt });
   await emit({ type: "status", sessionId: request.sessionId, status: "RUNNING", timestamp: Date.now() });
 
@@ -332,8 +332,11 @@ function ensureSystemPrompt(
   allowedTools: readonly string[],
   executionContextSummary?: string,
   rulesContext?: string,
+  systemPromptOverride?: string,
 ): void {
-  const base = buildAgentSystemPrompt(modelId, executionContextSummary, rulesContext);
+  // A nested run (subagent) supplies its own role prompt; the default Spider
+  // prompt would otherwise describe an orchestrator the subagent is not.
+  const base = systemPromptOverride ?? buildAgentSystemPrompt(modelId, executionContextSummary, rulesContext);
   const prompt = nativeTools ? base : `${base}\n\n${buildFallbackToolContract(allowedTools)}`;
   const existing = history.find((turn) => turn.role === "system");
   if (!existing) {

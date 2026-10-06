@@ -11,7 +11,14 @@ import { listRegisteredTools } from "./toolRegistry";
  * This is NOT an intent router: it never inspects the user's message and never
  * selects a tool. It only defines which tools the model may choose from.
  */
-export type AgentMode = "agent" | "ask" | "plan";
+export type AgentMode = "agent" | "ask" | "plan" | "subagent";
+
+/**
+ * Tools that only the orchestrator may call. Excluded from read-only modes and
+ * from the subagent set, which is what caps subagent nesting at depth 1: a
+ * subagent simply never sees `run_subagent` on its tool list.
+ */
+const SPAWN_TOOL_NAMES: ReadonlySet<string> = new Set(["run_subagent"]);
 
 export interface AgentModeDefinition {
   readonly mode: AgentMode;
@@ -28,6 +35,20 @@ export interface AgentModeDefinition {
 function readOnlyToolNames(): string[] {
   return listRegisteredTools()
     .filter((tool) => tool.permission === "safe" && tool.category !== "terminal")
+    .filter((tool) => !SPAWN_TOOL_NAMES.has(tool.name))
+    .map((tool) => tool.name);
+}
+
+/**
+ * The subagent tool set: read/search/inspection only. Derived from the
+ * registry, minus the interactive workflow tools a background worker must not
+ * reach (`ask_user`, `update_todo`) and minus `run_subagent` (no nesting).
+ * `finish` stays so a subagent can end with an explicit report.
+ */
+export function subagentToolNames(): string[] {
+  return listRegisteredTools()
+    .filter((tool) => tool.permission === "safe" && tool.category !== "terminal")
+    .filter((tool) => tool.category !== "workflow" || tool.name === "finish")
     .map((tool) => tool.name);
 }
 
@@ -49,6 +70,13 @@ const AGENT_MODES: Readonly<Record<AgentMode, AgentModeDefinition>> = {
     mode: "plan",
     description: "Planning mode with read and search tools.",
     tools: readOnlyToolNames(),
+  },
+  // Subagent: a read-only research worker (see subagentToolNames). Never user
+  // selectable — the runtime uses it for `run_subagent` dispatch.
+  subagent: {
+    mode: "subagent",
+    description: "Read-only research subagent: inspect and report, never modify.",
+    tools: subagentToolNames(),
   },
 };
 
