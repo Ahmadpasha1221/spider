@@ -34,6 +34,7 @@ import type { HostResolver } from "../net/urlSecurity";
 import type { WebSearchProvider } from "../net/webSearchProvider";
 import type { DiagnosticsSource } from "../diagnostics/diagnosticsSource";
 import { ToolExecutionError } from "./toolError";
+import { normalizeSubagentInput, type SubagentRunner } from "./subagent";
 import { isProbablyBinary, SEARCH_LIMITS, walkWorkspace } from "./workspaceSearch";
 
 const MAX_SEARCH_MATCHES = 50;
@@ -62,6 +63,11 @@ export interface WorkspaceToolExecutorOptions {
   readonly executionManager?: ExecutionManager;
   /** Overridable command runner (tests, alternative hosts). */
   readonly runCommand?: typeof runWorkspaceCommand;
+  /**
+   * Subagent orchestrator (see subagent.ts). Injected by the runtime after
+   * construction; absent outside a host that can run nested agent loops.
+   */
+  readonly subagents?: SubagentRunner;
 }
 
 export class WorkspaceToolExecutor implements RuntimeToolExecutor {
@@ -75,6 +81,7 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
   private readonly language?: LanguageSource;
   private readonly executionManager?: ExecutionManager;
   private readonly runCommandFn: typeof runWorkspaceCommand;
+  private subagents?: SubagentRunner;
 
   constructor(options: WorkspaceToolExecutorOptions = {}) {
     this.diagnostics = options.diagnostics;
@@ -87,6 +94,16 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     this.language = options.language;
     this.executionManager = options.executionManager;
     this.runCommandFn = options.runCommand ?? runWorkspaceCommand;
+    this.subagents = options.subagents;
+  }
+
+  /**
+   * Late injection point: the executor is built before RuntimeManager (which
+   * owns the runtimes and permissions a subagent needs), so the runtime sets
+   * itself here once constructed.
+   */
+  setSubagentRunner(runner: SubagentRunner | undefined): void {
+    this.subagents = runner;
   }
 
   async execute(call: RuntimeToolCall, context: RuntimeToolExecutorContext): Promise<unknown> {
@@ -207,6 +224,20 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
         });
       case "update_todo":
         return updateTodo(input, { ...(context.taskPlan ? { taskPlan: context.taskPlan } : {}) });
+      case "run_subagent": {
+        if (!this.subagents) {
+          throw new ToolExecutionError(
+            "dependency_unavailable",
+            "Subagents are not available in this host.",
+          );
+        }
+        // The runner owns isolation, mode gating, timeouts and depth limits;
+        // the executor only forwards the normalized request.
+        return this.subagents.runSubagent(normalizeSubagentInput(input), {
+          session: context.session,
+          ...(context.signal ? { signal: context.signal } : {}),
+        });
+      }
       case "fetch_url":
         return fetchUrl(
           input,

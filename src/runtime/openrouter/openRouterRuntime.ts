@@ -202,6 +202,11 @@ export class OpenRouterRuntime implements AgentRuntime {
     return this.inference.restoreHistory(sessionId, turns);
   }
 
+  /** Drops a synthetic session's history (subagent runs). */
+  disposeHistory(sessionId: string): void {
+    this.inference.disposeHistory(sessionId);
+  }
+
   async cancel(request: RuntimeCancelRequest): Promise<void> {
     await this.inference.cancel(request);
   }

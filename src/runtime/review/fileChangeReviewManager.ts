@@ -3,6 +3,18 @@ import * as path from "node:path";
 import { computeLineDiff, diffStats } from "./lineDiff";
 import type { FileChangeSummary } from "../runtimeTypes";
 
+export interface ChangeSnapshot {
+  readonly changeId: string;
+  readonly sessionId: string;
+  readonly toolCallId: string;
+  readonly toolName: "write_file" | "edit_file";
+  readonly path: string;
+  readonly beforeExists: boolean;
+  readonly beforeContent?: string;
+  readonly afterContent: string;
+  readonly status: "APPLIED" | "REVERTED" | "MISSING";
+}
+
 export interface CapturedFileChange {
   readonly changeId: string;
   readonly sessionId: string;
@@ -103,6 +115,29 @@ export class FileChangeReviewManager {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Raw before/after snapshot for a change (A4). The interactive diff review
+   * needs the original bytes to compute per-hunk reverts against the live
+   * document; the summary only carries display data.
+   */
+  getSnapshot(changeId: string): ChangeSnapshot | undefined {
+    const stored = this.findStored(changeId);
+    if (!stored) {
+      return undefined;
+    }
+    return {
+      changeId: stored.changeId,
+      sessionId: stored.sessionId,
+      toolCallId: stored.toolCallId,
+      toolName: stored.toolName,
+      path: stored.path,
+      beforeExists: stored.beforeExists,
+      ...(stored.beforeContent !== undefined ? { beforeContent: stored.beforeContent } : {}),
+      afterContent: stored.afterContent,
+      status: stored.status,
+    };
   }
 
   clearSession(sessionId: string): void {

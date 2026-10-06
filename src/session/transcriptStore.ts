@@ -24,6 +24,8 @@ export interface TranscriptEntry {
   readonly kind: TranscriptEntryKind;
   readonly text: string;
   readonly timestamp: number;
+  /** Model that produced an assistant reply (display metadata, A8). */
+  readonly modelName?: string;
   readonly toolName?: string;
   readonly command?: string;
   readonly path?: string;
@@ -192,6 +194,7 @@ function parseEntry(value: unknown): TranscriptEntry | undefined {
     kind: record.kind as TranscriptEntryKind,
     text: record.text,
     timestamp: typeof record.timestamp === "number" ? record.timestamp : Date.now(),
+    ...(typeof record.modelName === "string" && record.modelName.length > 0 ? { modelName: record.modelName } : {}),
     ...(typeof record.toolName === "string" ? { toolName: record.toolName } : {}),
     ...(typeof record.command === "string" ? { command: record.command } : {}),
     ...(typeof record.path === "string" ? { path: record.path } : {}),

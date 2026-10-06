@@ -189,6 +189,12 @@ export interface RuntimeSendRequest {
    * and never alter permissions, tools or safety controls.
    */
   readonly rulesContext?: string;
+  /**
+   * Full system-prompt override for a nested run (subagents). When set it
+   * replaces the default Spider prompt; the fallback tool contract is still
+   * appended for providers without native tool calling.
+   */
+  readonly systemPrompt?: string;
   readonly messages?: readonly RuntimeMessage[];
   readonly signal?: AbortSignal;
   readonly onToolCall?: (
@@ -233,6 +239,8 @@ export type RuntimeEvent =
       message: string;
       /** Transcript entry id so the chat UI can Copy/Delete this exact reply. */
       messageId?: string;
+      /** Model identifier that produced this reply (display metadata, A8). */
+      modelName?: string;
       timestamp: number;
     }
   | { type: "text_delta"; sessionId: string; text: string; timestamp: number }
@@ -358,6 +366,11 @@ export interface AgentRuntime {
   sendMessage(request: RuntimeSendRequest, emit: RuntimeEventSink): Promise<void>;
   cancel(request: RuntimeCancelRequest): Promise<void>;
   dispose(): void;
+  /**
+   * Drops the in-memory model history for a synthetic session (subagent runs).
+   * Optional: hosts that keep no per-session history can omit it.
+   */
+  disposeHistory?(sessionId: string): void;
   /**
    * Seeds a fresh (empty) model history from restored transcript turns —
    * used once per session after a restart, when the in-memory history was

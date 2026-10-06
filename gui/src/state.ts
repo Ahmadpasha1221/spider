@@ -1,5 +1,6 @@
 import type {
   AuthStatus,
+  CheckpointView,
   ExtensionInfoView,
   FileChangeView,
   LocalModel,
@@ -45,6 +46,10 @@ export interface ChatLine {
    * recorded with the prompt, so Delete reaches conversation persistence.
    */
   messageId?: string;
+  /** Unix epoch ms when the message was created (from the backend transcript). */
+  timestamp?: number;
+  /** Model name that produced this reply (agent role only). */
+  modelName?: string;
   streaming?: boolean;
   permission?: {
     requestId: string;
@@ -117,6 +122,8 @@ export interface AppState {
   extensionInfo?: ExtensionInfoView;
   /** Currently open section of the redesigned Settings page. */
   settingsSection: SettingsSection;
+  /** Workspace checkpoints for the active conversation (A2, host-authoritative). */
+  checkpoints: CheckpointView[];
 }
 
 export function createInitialState(): AppState {
@@ -145,6 +152,7 @@ export function createInitialState(): AppState {
     todoItems: [],
     pendingQuestion: undefined,
     settingsSection: "models",
+    checkpoints: [],
   };
 }
 

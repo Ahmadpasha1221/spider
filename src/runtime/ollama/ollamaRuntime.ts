@@ -178,6 +178,11 @@ export class OllamaRuntime implements AgentRuntime {
     return true;
   }
 
+  /** Drops a synthetic session's history (subagent runs) so it cannot leak. */
+  disposeHistory(sessionId: string): void {
+    this.histories.delete(sessionId);
+  }
+
   dispose(): void {
     this.histories.clear();
   }

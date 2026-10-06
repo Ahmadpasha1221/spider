@@ -8,6 +8,20 @@ import type { Logger } from "../utils/logger";
 import { ToolRouter } from "./tools/toolRouter";
 import { DEFAULT_AGENT_MODE, type AgentMode } from "./tools/toolAvailability";
 import { FileChangeReviewManager, joinWorkspacePath } from "./review/fileChangeReviewManager";
+import {
+  CheckpointManager,
+  toCheckpointSummary,
+  type CheckpointSummary,
+} from "./checkpoints/checkpointManager";
+import {
+  SUBAGENT_LIMITS,
+  buildSubagentSystemPrompt,
+  clampSubagentSummary,
+  type SubagentContext,
+  type SubagentInput,
+  type SubagentResult,
+  type SubagentRunner,
+} from "./tools/subagent";
 import type { DiffViewService } from "./review/diffView";
 import type { RuntimeUsage } from "./runtimeTypes";
 import {
@@ -141,7 +155,7 @@ function resultSize(result: unknown): number {
   }
 }
 
-export class RuntimeManager implements vscode.Disposable {
+export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   private readonly runtimes = new Map<AgentRuntime["provider"], AgentRuntime>();
   private readonly sessions = new Map<string, CodeviaSession>();
   private readonly activeRuns = new Map<string, ActiveRun>();
@@ -155,6 +169,15 @@ export class RuntimeManager implements vscode.Disposable {
   private readonly lastPrompts = new Map<string, string>();
   private readonly toolRouter: ToolRouter;
   private readonly reviewManager = new FileChangeReviewManager();
+  /** Per-session checkpoint timeline over recorded file changes (A2). */
+  private readonly checkpoints = new CheckpointManager();
+  /**
+   * Subagent orchestration state (A7). `subagentDepth` enforces depth 1: while a
+   * subagent is running, a nested dispatch is refused rather than recursing.
+   * `activeSubagents` bounds concurrent workers.
+   */
+  private subagentDepth = 0;
+  private activeSubagents = 0;
   private readonly usageBySession = new Map<string, RuntimeUsage>();
   /**
    * Sessions whose provider history was already seeded from the persisted
@@ -240,6 +263,184 @@ export class RuntimeManager implements vscode.Disposable {
     return this.reviewManager.listChanges(sessionId);
   }
 
+  /** Checkpoints for a conversation, oldest first (A2). */
+  listCheckpoints(sessionId: string): CheckpointSummary[] {
+    return this.checkpoints.list(sessionId).map(toCheckpointSummary);
+  }
+
+  /**
+   * Rolls the workspace back to a checkpoint: reverts every recorded change
+   * applied after it (newest first), then drops the later checkpoints. Returns
+   * the surviving timeline, or undefined when the id is unknown.
+   */
+  async restoreCheckpoint(
+    checkpointId: string,
+  ): Promise<{ sessionId: string; items: CheckpointSummary[] } | undefined> {
+    const checkpoint = this.checkpoints.get(checkpointId);
+    if (!checkpoint) {
+      return undefined;
+    }
+    const sessionId = checkpoint.sessionId;
+    const workspacePath =
+      this.sessions.get(sessionId)?.workspacePath ?? this.options.defaultWorkspacePath ?? ".";
+    const changes = this.reviewManager.listChanges(sessionId);
+    const toRevert = changes
+      .slice(checkpoint.changeCount)
+      .filter((change) => change.status === "APPLIED")
+      .reverse();
+    for (const change of toRevert) {
+      try {
+        const reverted = await this.reviewManager.revert(change.changeId, workspacePath);
+        this.publishEvent({
+          type: "file_change_reverted",
+          sessionId,
+          change: reverted,
+          timestamp: Date.now(),
+        });
+      } catch {
+        // Best-effort per file: one failure must not abort the restore.
+      }
+    }
+    this.checkpoints.truncateFrom(checkpointId);
+    this.recordTranscript(sessionId, {
+      kind: "system",
+      text: `Restored checkpoint: ${checkpoint.label}`,
+      timestamp: Date.now(),
+    });
+    return { sessionId, items: this.listCheckpoints(sessionId) };
+  }
+
+  /**
+   * Runs a read-only research subagent (A7). Orchestrator-worker pattern:
+   * the parent agent stays the single orchestrator and receives only the
+   * subagent's distilled report.
+   *
+   * The subagent is an isolated agent loop: its own (synthetic) model history
+   * so it cannot see or pollute the parent conversation, the read-only
+   * `subagent` tool mode, a wall-clock timeout, and no ability to nest. Its
+   * tool calls still route through the same ToolRouter + permission pipeline
+   * (`handleToolCall`), so there is no permission bypass.
+   */
+  async runSubagent(input: SubagentInput, context: SubagentContext): Promise<SubagentResult> {
+    if (this.subagentDepth >= SUBAGENT_LIMITS.maxDepth) {
+      return {
+        status: "limit",
+        summary: "",
+        toolsUsed: [],
+        notes: "A subagent cannot dispatch another subagent.",
+      };
+    }
+    if (this.activeSubagents >= SUBAGENT_LIMITS.maxConcurrent) {
+      return {
+        status: "limit",
+        summary: "",
+        toolsUsed: [],
+        notes: `Too many subagents are already running (limit ${SUBAGENT_LIMITS.maxConcurrent}).`,
+      };
+    }
+
+    const parent = context.session;
+    const runtime = this.getRequiredRuntime(parent.provider);
+    const subagentSessionId = `subagent-${crypto.randomUUID()}`;
+    const controller = new AbortController();
+    let timedOut = false;
+    const onParentAbort = (): void => controller.abort();
+    context.signal?.addEventListener("abort", onParentAbort);
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, SUBAGENT_LIMITS.timeoutMs);
+
+    this.subagentDepth += 1;
+    this.activeSubagents += 1;
+
+    let report = "";
+    const toolsUsed = new Set<string>();
+    try {
+      // Rules are context only, and a load failure must never fail a subagent.
+      let rulesContext: string | undefined;
+      try {
+        rulesContext = await this.options.rulesLoader?.(parent.workspacePath);
+      } catch {
+        rulesContext = undefined;
+      }
+
+      await runtime.sendMessage(
+        {
+          sessionId: subagentSessionId,
+          workspacePath: parent.workspacePath,
+          modelId: parent.modelId ?? this.getModelId(parent.provider),
+          prompt: input.task,
+          // Read-only tool set: derived from the registry, excludes writes,
+          // terminal, ask_user/update_todo and run_subagent.
+          mode: "subagent",
+          systemPrompt: buildSubagentSystemPrompt(input, {
+            ...(rulesContext ? { rulesContext } : {}),
+          }),
+          signal: controller.signal,
+          onToolCall: (call, signal) =>
+            this.handleToolCall(parent.sessionId, call, signal ?? controller.signal, "subagent"),
+          // The subagent's tokens still count toward the parent conversation.
+          usageSink: (usage) =>
+            this.handleRuntimeEvent(parent.sessionId, {
+              type: "usage",
+              sessionId: parent.sessionId,
+              usage,
+              timestamp: Date.now(),
+            }),
+        },
+        (event) => {
+          // Capture only what the parent needs; the subagent's thinking, tool
+          // calls and tool output deliberately never reach the parent UI.
+          if (event.type === "assistant_message" && event.message.trim().length > 0) {
+            report = event.message;
+          } else if (event.type === "tool_call") {
+            toolsUsed.add(event.toolCall.name);
+          }
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The subagent failed.";
+      this.options.logger?.warn("Subagent run failed", { operation: "runSubagent", sessionId: parent.sessionId });
+      return {
+        status: timedOut ? "cancelled" : "failed",
+        summary: clampSubagentSummary(report),
+        toolsUsed: [...toolsUsed],
+        notes: message,
+      };
+    } finally {
+      clearTimeout(timeout);
+      context.signal?.removeEventListener("abort", onParentAbort);
+      this.subagentDepth -= 1;
+      this.activeSubagents -= 1;
+      // Synthetic history is dropped so repeated subagents cannot leak memory.
+      try {
+        runtime.disposeHistory?.(subagentSessionId);
+      } catch {
+        // Cleanup is best-effort.
+      }
+    }
+
+    const summary = clampSubagentSummary(report);
+    if (timedOut) {
+      return {
+        status: "cancelled",
+        summary,
+        toolsUsed: [...toolsUsed],
+        notes: `Subagent timed out after ${SUBAGENT_LIMITS.timeoutMs / 1000}s.`,
+      };
+    }
+    if (summary.length === 0) {
+      return {
+        status: "failed",
+        summary: "",
+        toolsUsed: [...toolsUsed],
+        notes: "The subagent returned no report.",
+      };
+    }
+    return { status: "completed", summary, toolsUsed: [...toolsUsed] };
+  }
+
   async resolveFileChange(changeId: string, decision: "ACCEPT" | "REJECT" | "VIEW_DIFF"): Promise<FileChangeSummary | undefined> {
     const change = this.reviewManager.getChange(changeId);
     if (!change) {
@@ -271,10 +472,19 @@ export class RuntimeManager implements vscode.Disposable {
       return;
     }
     if (this.options.diffView) {
+      const snapshot = this.reviewManager.getSnapshot(changeId);
       await this.options.diffView.showDiff({
         title: `Agent change: ${change.path}`,
         beforeExists: change.beforeExists,
+        // The pre-change bytes make the diff's left side real and enable the
+        // per-hunk review lenses (A4); without them an edited file showed an
+        // empty original.
+        ...(snapshot?.beforeContent !== undefined ? { beforeContent: snapshot.beforeContent } : {}),
         afterPath: this.absolutePathFor(change.sessionId, change.path),
+        changeId,
+        onRevertAll: async () => {
+          await this.resolveFileChange(changeId, "REJECT");
+        },
       });
       return;
     }
@@ -494,6 +704,7 @@ export class RuntimeManager implements vscode.Disposable {
     this.userQuestions.cancelSession(sessionId);
     this.taskPlans.clear(sessionId);
     this.restoredHistories.delete(sessionId);
+    this.checkpoints.clearSession(sessionId);
     try {
       await this.options.transcriptStore?.delete(sessionId);
     } catch {
@@ -612,6 +823,9 @@ export class RuntimeManager implements vscode.Disposable {
       text: prompt,
       timestamp: Date.now(),
     });
+    // Snapshot the timeline boundary before this run mutates anything, so the
+    // user can roll back to "before the agent ran" (A2).
+    this.checkpoints.create(sessionId, prompt, this.reviewManager.listChanges(sessionId).length);
 
     // Agent mode is an internal runtime concern, never a user choice: the
     // shipped path always runs with the full registered tool set so the model
@@ -1143,13 +1357,29 @@ export class RuntimeManager implements vscode.Disposable {
     if (event.type === "command_output" && event.partial) {
       return event;
     }
-    const entry = transcriptEntryFromEvent(event);
+    // Assistant replies carry the model that produced them so the chat UI can
+    // show per-message metadata — live and after a transcript restore (A8).
+    const enriched: RuntimeEvent =
+      event.type === "assistant_message" && !event.modelName
+        ? { ...event, modelName: this.activeModelId() }
+        : event;
+    const entry = transcriptEntryFromEvent(enriched);
     if (!entry) {
-      return event;
+      return enriched;
     }
-    const id = event.type === "assistant_message" ? crypto.randomUUID() : undefined;
+    const id = enriched.type === "assistant_message" ? crypto.randomUUID() : undefined;
     void this.recordTranscript(sessionId, id ? { ...entry, id } : entry);
-    return id && event.type === "assistant_message" ? { ...event, messageId: id } : event;
+    return id && enriched.type === "assistant_message"
+      ? { ...enriched, messageId: id }
+      : enriched;
+  }
+
+  /** Active model identifier for display metadata (falls back to provider). */
+  private activeModelId(): string | undefined {
+    if (this.activeConfig && "modelId" in this.activeConfig && this.activeConfig.modelId) {
+      return this.activeConfig.modelId;
+    }
+    return this.activeConfig?.provider;
   }
 
   private normalizeRuntimeStatus(status: RuntimeSessionStatus): RuntimeSessionStatus {
@@ -1302,7 +1532,12 @@ function transcriptEntryFromEvent(event: RuntimeEvent): TranscriptEntry | undefi
   const timestamp = event.timestamp;
   switch (event.type) {
     case "assistant_message":
-      return { kind: "assistant", text: event.message, timestamp };
+      return {
+        kind: "assistant",
+        text: event.message,
+        timestamp,
+        ...(event.modelName ? { modelName: event.modelName } : {}),
+      };
     case "thinking":
       return { kind: "thinking", text: event.message, timestamp };
     case "tool_call":

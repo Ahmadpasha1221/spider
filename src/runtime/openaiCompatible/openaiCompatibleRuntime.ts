@@ -246,6 +246,11 @@ export class OpenAICompatibleRuntime implements AgentRuntime {
     return true;
   }
 
+  /** Drops a synthetic session's history (subagent runs) so it cannot leak. */
+  disposeHistory(sessionId: string): void {
+    this.histories.delete(sessionId);
+  }
+
   /** Current API key (never log the returned value). */
   getApiKey(): string | undefined {
     return this.apiKey;

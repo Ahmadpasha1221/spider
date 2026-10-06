@@ -141,6 +141,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     executionManager,
     rulesLoader: (workspacePath) => workspaceRulesService.getRulesContext(workspacePath),
   });
+  // The runtime orchestrates subagents (it owns runtimes, tool routing and
+  // permissions); the executor was built first, so inject it after construction.
+  toolExecutor.setSubagentRunner(runtimeManager);
 
   // The execution context is cached per workspace; drop it when the workspace
   // folders or the terminal shell configuration change so no stale environment

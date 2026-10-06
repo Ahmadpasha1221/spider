@@ -10,6 +10,10 @@ export type LocalProvider = "ollama" | "openai-compatible";
 export type WebviewMessage =
   | { type: "SEND_PROMPT"; prompt: string; sessionId: string; messageId?: string }
   | { type: "GET_TRANSCRIPT"; sessionId: string }
+  /** Workspace checkpoints for a conversation (A2). */
+  | { type: "GET_CHECKPOINTS"; sessionId: string }
+  /** Rolls the workspace back to a checkpoint and returns the new timeline. */
+  | { type: "RESTORE_CHECKPOINT"; checkpointId: string }
   | { type: "CANCEL_RUN"; sessionId: string }
   | { type: "NEW_SESSION"; workspacePath?: string }
   | { type: "SELECT_SESSION"; sessionId: string }
@@ -106,6 +110,14 @@ export interface PermissionRulesView {
   rules: Record<PermissionRuleCategory, PermissionRule>;
 }
 
+/** One workspace checkpoint in the session timeline (A2). */
+export interface CheckpointView {
+  id: string;
+  label: string;
+  timestamp: number;
+  changeCount: number;
+}
+
 /** Static extension metadata for Settings → About Spider. */
 export interface ExtensionInfoView {
   displayName: string;
@@ -133,7 +145,7 @@ export interface TodoItemView {
 
 export type ExtensionMessage =
   | { type: "AGENT_STATE"; state: AgentState }
-  | { type: "AGENT_MESSAGE"; message: string; messageId?: string }
+  | { type: "AGENT_MESSAGE"; message: string; messageId?: string; timestamp?: number; modelName?: string }
   | { type: "AGENT_TEXT_DELTA"; sessionId: string; text: string }
   | { type: "AGENT_USAGE"; promptTokens: number; completionTokens: number; totalTokens: number; costUsd?: number; partial?: boolean }
   | { type: "FILE_CHANGE"; change: FileChangeView }
@@ -145,6 +157,7 @@ export type ExtensionMessage =
   | { type: "AGENT_ERROR"; error: string }
   | { type: "PERMISSION_REQUEST"; requestId: string; message: string; command?: string; category?: string; destructive?: boolean }
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
+  | { type: "CHECKPOINTS"; sessionId: string; items: CheckpointView[] }
   | { type: "AUTO_APPROVE_STATE"; enabled: boolean; scope: "conversation" | "runtime" }
   | { type: "PERMISSION_RULES"; rules: Record<PermissionRuleCategory, PermissionRule> }
   /** `ask_user`: a question the agent is waiting on (correlated by requestId). */
@@ -184,6 +197,7 @@ export type ExtensionMessage =
         kind: "user" | "assistant" | "thinking" | "tool" | "command" | "error" | "system";
         text: string;
         timestamp: number;
+        modelName?: string;
         toolName?: string;
         command?: string;
         path?: string;

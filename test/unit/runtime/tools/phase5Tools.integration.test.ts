@@ -191,7 +191,8 @@ describe("Phase 5 registry + availability contract", () => {
       expect(tool?.parameters.type).toBe("object");
       expect(tool?.summarize({}).length).toBeGreaterThan(0);
     }
-    expect(listRegisteredTools()).toHaveLength(35);
+    // 35 Phase 1-5 tools plus run_subagent (A7 orchestration).
+    expect(listRegisteredTools()).toHaveLength(36);
   });
 
   it("classifies the new tools through the existing permission sets", () => {

@@ -7,6 +7,7 @@ import * as backgroundProcessTools from "./backgroundProcessManager";
 // ---- Phase 3 imports ---------------------------------------------------------
 import * as processTools from "./processTools";
 import * as askUserTool from "./askUserTool";
+import { SUBAGENT_LIMITS, validateSubagentInput } from "./subagent";
 import * as fetchUrlTool from "./fetchUrlTool";
 import { MAX_TODO_ITEMS, MAX_TODO_TITLE_LENGTH } from "../state/taskPlan";
 // ---- Phase 4 imports ---------------------------------------------------------
@@ -1041,6 +1042,37 @@ const TOOLS: readonly RegisteredTool[] = [
       const runner = stringInput(input, "runner");
       const args = Array.isArray(input.args) ? input.args.filter((entry) => typeof entry === "string").join(" ") : "";
       return runner ? `Running tests: ${runner}${args.length > 0 ? ` ${args}` : ""}…` : "Running tests…";
+    },
+  }),
+
+  // ---- Orchestration (subagents) ---------------------------------------
+  workspaceTool({
+    name: "run_subagent",
+    description: `Dispatch a READ-ONLY research subagent to investigate the workspace and return a concise report. Use it for broad, multi-file questions ("where is X implemented", "how does Y flow") so the raw search output stays out of your context; it cannot modify files, run commands, or ask the user. Skip it when you already know the file or the answer.`,
+    permission: "safe",
+    category: "workflow",
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: `Self-contained investigation for the subagent (maximum ${SUBAGENT_LIMITS.maxTaskChars} characters).` },
+        description: { type: "string", description: "Short label for the progress UI." },
+      },
+      required: ["task"],
+    },
+    required: ["task"],
+    exampleArguments: {
+      task: "Find where streaming response state is managed and how partial output reaches the UI.",
+      description: "Trace streaming state",
+    },
+    validate: (input) => validateSubagentInput(input),
+    summarize: (input) => {
+      const description =
+        typeof input.description === "string" && input.description.trim().length > 0
+          ? input.description.trim()
+          : typeof input.task === "string"
+            ? input.task.trim().slice(0, 60)
+            : "";
+      return description ? `Researching: ${description}…` : "Researching with a subagent…";
     },
   }),
 
