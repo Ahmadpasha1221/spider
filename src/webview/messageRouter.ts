@@ -179,6 +179,18 @@ export class MessageRouter {
         const entries = await this.agentManager.loadTranscript(typed.sessionId);
         return { type: "TRANSCRIPT", sessionId: typed.sessionId, entries };
       }
+      case "GET_CHECKPOINTS": {
+        const items = this.runtimeManager?.listCheckpoints(typed.sessionId) ?? [];
+        return { type: "CHECKPOINTS", sessionId: typed.sessionId, items } as ExtensionMessage;
+      }
+      case "RESTORE_CHECKPOINT": {
+        const restored = await this.runtimeManager?.restoreCheckpoint(typed.checkpointId);
+        return {
+          type: "CHECKPOINTS",
+          sessionId: restored?.sessionId ?? "",
+          items: restored?.items ?? [],
+        } as ExtensionMessage;
+      }
       case "OPEN_FILE":
         if (this.runtimeManager) {
           await this.runtimeManager.openFile(typed.path);
@@ -367,6 +379,8 @@ export class MessageRouter {
           type: "AGENT_MESSAGE",
           message: event.message,
           ...(event.messageId ? { messageId: event.messageId } : {}),
+          timestamp: event.timestamp,
+          ...(event.modelName ? { modelName: event.modelName } : {}),
         };
       case "text_delta":
         return { type: "AGENT_TEXT_DELTA", sessionId: event.sessionId, text: event.text };

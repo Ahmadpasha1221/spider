@@ -10,6 +10,7 @@ import { MessageRouter } from "./messageRouter";
 import { HistoryPanel } from "./historyPanel";
 import { AgentEditorPanel } from "./agentEditorPanel";
 import { ExtensionMessage, isExtensionMessage, SessionListItem } from "./types";
+import { shouldForwardResult } from "./resultForwarding";
 import { EXTENSION_NAME, EXTENSION_VERSION } from "../shared/constants";
 import { Logger } from "../utils/logger";
 import type { PermissionManager } from "../permissions/permissionManager";
@@ -287,18 +288,6 @@ export class AgentWebviewHost implements vscode.Disposable {
       .replaceAll("{{showSettings}}", showSettings ? "1" : "0");
     return html;
   }
-}
-
-function shouldForwardResult(type: ExtensionMessage["type"]): boolean {
-  return (
-    type === "AUTH_STATUS"
-    || type === "RUNTIME_STATUS"
-    || type === "LOCAL_MODELS"
-    || type === "OPENROUTER_MODELS"
-    || type === "TRANSCRIPT"
-    || type === "TODO_UPDATED"
-    || type === "USER_QUESTION_CLOSED"
-  );
 }
 
 function isTranscriptMessage(
