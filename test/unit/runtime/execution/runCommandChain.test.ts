@@ -52,5 +52,8 @@ describe("run_command end-to-end chain", () => {
     });
     expect(response.allowed).toBe(true);
     expect(response.result).toMatchObject({ success: true, tool: "run_command" });
-  });
+    // The chain imports the whole runtime graph and resolves instantly with a
+    // mocked runner (57ms alone); under full-suite contention on Windows it
+    // can exceed the 5s default, so give it headroom. No assertion is relaxed.
+  }, 20_000);
 });
