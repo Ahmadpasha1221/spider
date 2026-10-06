@@ -16,45 +16,67 @@ tool source. Spider has a closed, hand-registered tool set. Any user wanting
 Jira/GitHub/Postgres/browser tools must fork the code. This is the single
 biggest ecosystem gap.
 
-### A2. No checkpoints / workspace snapshots — **missing, high impact**
+### A2. No checkpoints / workspace snapshots — **FIXED (2026-10-06)**
+`CheckpointManager` records a per-session timeline (one checkpoint per run,
+labelled with the prompt); a header popover lists them and "restore" reverts
+every recorded change applied after it via `fileChangeReviewManager`, then
+truncates the later checkpoints. No git dependency, so it works in any folder.
 Users cannot roll the workspace back to "before the agent ran".
 `fileChangeReviewManager` captures per-edit before/after and supports
 revert, but there is no git-stash-like checkpoint timeline. Wrong pattern for
 a coding agent: trust comes from being able to undo.
 
-### A3. No markdown rendering in chat — **missing, high impact (GUI)**
+### A3. No markdown rendering in chat — **FIXED** (`marked` + DOMPurify allowlist)
 `gui/styles/main.css` uses `white-space: pre-wrap` for messages and there is
 no markdown parser dependency in `gui/`. Agent replies are rendered as raw
 text — code fences, tables, and bold show as literal characters. Every
 competitor renders markdown. **This is currently a broken user experience for
 the primary output type of an LLM.**
 
-### A4. No inline diff accept/reject in the editor — **missing**
+### A4. No inline diff accept/reject in the editor — **FIXED (2026-10-06)**
+The native diff now carries per-hunk CodeLens review: `hunkReview.revertHunk`
+rewrites only the chosen hunk back to the pre-change bytes (pure, tested),
+with "Keep/Reject hunk" and "Keep/Revert all" lenses over the live document.
+Also fixed the diff's left side being empty (beforeContent was never passed).
 Edits surface as artifact cards (Open/View changes/Keep/Revert) but there is
 no editor-integrated inline diff view with Accept/Reject per hunk. `diffView.ts`
 exists but the flow is weaker than Cline/Cursor's apply-edit.
 
-### A5. No custom instructions / rules files — **missing**
+### A5. No custom instructions / rules files — **FIXED** (`.spiderrules` + `WorkspaceRulesService`)
 No `.spiderrules` / `.clinerules` / memory file. Users cannot give persistent
 project instructions (coding style, conventions) without pasting them every
 session. System prompt is registry-generated only.
 
-### A6. No slash commands / prompt templates — **missing**
-No `/explain`, `/fix`, `/refactor` templates or user-defined commands.
+### A6. No slash commands / prompt templates — **FIXED (2026-10-06)**
+`gui/src/slashCommands.ts` (pure, tested) ships `/explain /fix /test /review
+/refactor /document`; typing `/` opens a filterable composer menu and the
+prompt is expanded to its template on send. User-defined tables are a drop-in
+via `ComposerHandle.setSlashCommands`. No `/explain`, `/fix`, `/refactor`
+templates or user-defined commands.
 
-### A7. No subagents / task orchestration — **missing**
+### A7. No subagents / task orchestration — **FIXED (2026-10-06)**
+`run_subagent` (orchestrator-worker / "agent as tool") dispatches a read-only
+research subagent: isolated model history, the `subagent` tool mode (no writes,
+terminal, ask_user/update_todo or nesting), a wall-clock timeout, and depth +
+concurrency caps. It returns only a distilled report, so raw search output
+stays out of the main context, while its tool calls still pass through the same
+ToolRouter and permission pipeline. Remaining: the loop awaits one dispatch at
+a time (parallel workers), and workers cannot write.
 No parallel agents, no "@agent" delegation. Fine to defer, but it's a
 known differentiator gap.
 
-### A8. No per-message metadata in chat — **missing**
+### A8. No per-message metadata in chat — **FIXED (2026-10-06)**
+Assistant replies now render `Spider · HH:MM · <model>`; the model id is
+persisted in the transcript (`TranscriptEntry.modelName`) so metadata survives
+a restart. Per-message token/cost is still not shown.
 No timestamps, no model name under a reply, no token count/cost per message.
 Usage accumulates per session but is never shown in the transcript UI.
 
-### A9. No suggestion chips / empty-state guidance — **missing (GUI)**
+### A9. No suggestion chips / empty-state guidance — **FIXED** (`SUGGESTIONS` chips fill the composer)
 Empty state is only a watermark. No "Fix a bug", "Explain this file" starter
 prompts.
 
-### A10. No history UI in chat — **intentional but user-hostile**
+### A10. No history UI in chat — **PARTIALLY FIXED** (in-chat session switcher + History tab)
 History DELETION from the chat UI (2026-09-29) decoupled persistence from
 the visible UI, but left no in-chat way to get back to an old conversation.
 The backend keeps every conversation; the user can't reach them without the

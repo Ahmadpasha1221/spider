@@ -271,6 +271,7 @@ fallback contract. `isLocalToolName` is the membership test.
 | `find_references` | usages of the symbol at a position | `path`, `line`, `character`, `includeDeclaration?` (default true) | safe | `{ path, includeDeclaration, references[{path,range}], truncated, reason? }` (max 500) |
 | `get_problems` | diagnostics VS Code currently reports | `scope?` (`workspace` default / `file`), `path?` (required for file) | safe | `{ scope, path?, problems[{path,severity,message,source?,code?,range}], summary, truncated, reason?, note? }` (max 500) |
 | `run_tests` | run the project's test suite with an approved runner | `runner` (required, allow-list), `args?` (argv) XOR `path?`+`filter?` (target contract), `cwd?`, `timeoutMs?` (default 120000, max 300000) | **execute** | `{ runner, args, command, cwd, path?, filter?, passed, exitCode, durationMs, stdout, stderr, timedOut, cancelled?, truncated, status }` |
+| `run_subagent` | dispatch a read-only research subagent and get back only its report | `task` (required, ≤4000 chars), `description?` | safe | `{ status, summary, toolsUsed[], notes? }` — see §5 “Subagents”. Read-only: no writes, commands, ask_user, update_todo, or nesting |
 | `finish` | end the task | `summary` | safe | executed inline in the registry (no executor); sets `finished: true` |
 
 ### Shared tool building blocks (Phase 1, 2026-09-29)
@@ -455,6 +456,34 @@ Optional explicit overrides `spider.execution.shell` and
 summary appears in Settings → About (`ExtensionInfoView.executionContext`).
 The 120 ms `command_output` coalescing, permissions, cancellation, timeouts and
 stdout/stderr streaming are unchanged: only the resolved launch is new.
+
+### Subagents (A7, 2026-10-06)
+Orchestrator-worker / "agent as tool" (the pattern Microsoft Agent Framework
+and Semantic Kernel recommend when intermediate work should not pollute the
+caller's context). Spider's main agent stays the single orchestrator; the one
+supported worker today is a **read-only research subagent**.
+
+- **Tool:** `run_subagent({ task, description? })` — `src/runtime/tools/subagent.ts`
+  holds the pure contract (`SubagentInput`/`SubagentResult`, limits,
+  validation, role prompt, report clamping) and the `SubagentRunner` interface.
+- **Orchestration:** `RuntimeManager.runSubagent` (`src/runtime/runtimeManager.ts`)
+  runs the worker through the SAME provider and the SAME `handleToolCall` →
+  `ToolRouter` → permission pipeline. There is no second tool path and no
+  permission bypass.
+- **Isolation:** each run uses a synthetic `subagent-<uuid>` session id, so it
+  gets its own model history and cannot see or pollute the parent conversation;
+  the history is dropped via `AgentRuntime.disposeHistory` when the run ends.
+  Usage still accumulates on the parent session.
+- **Mode:** the run uses the new `subagent` agent mode (`toolAvailability.ts`),
+  a registry-derived read-only set that excludes writes, terminal tools,
+  `ask_user`, `update_todo`, and `run_subagent` itself. That exclusion is what
+  caps nesting at depth 1; `SUBAGENT_LIMITS.maxDepth`/`maxConcurrent` and a
+  180 s timeout back it up.
+- **Result:** only the worker's final report (clamped) reaches the parent — its
+  thinking, tool calls and tool output are captured and deliberately discarded.
+- **Prompt:** `buildAgentSystemPrompt` guidance tells the agent WHEN to dispatch
+  (broad multi-file investigations) and when not to (a known file, a single
+  edit, anything needing a workspace change).
 
 ### ToolRouter
 `src/runtime/tools/toolRouter.ts` — `route(call, context, authorize, {mode})`:
@@ -648,6 +677,30 @@ views, batches UI syncs (`scheduleUiSync` → one rAF per event burst).
 - `protocol.ts` — `GuiToHost` / `HostToGui` mirrors of `src/webview/types.ts`
   (keep both in sync).
 - `bridge.ts` — `postToHost` / `onHostMessage` over `acquireVsCodeApi`.
+
+### A-series additions (2026-10-06)
+- **A6 slash commands:** `slashCommands.ts` (pure: `parseSlashCommand`,
+  `expandSlashCommand`, `filterSlashCommands`, `BUILTIN_SLASH_COMMANDS`).
+  `composer.ts` opens a filterable menu on a leading `/` (ArrowUp/Down,
+  Enter/Tab accept, Escape close) and expands the template on send. Extra
+  command tables plug in via `ComposerHandle.setSlashCommands`.
+- **A8 per-message metadata:** assistant replies render `Spider · HH:MM ·
+  model`. `RuntimeManager.recordTranscriptEvent` stamps `modelName` from the
+  active config; it is persisted (`TranscriptEntry.modelName`) and re-emitted
+  on restore, so the chrome survives a restart. Per-message token/cost is
+  still not shown.
+- **A2 checkpoints:** `src/runtime/checkpoints/checkpointManager.ts` (pure)
+  tracks a per-session timeline; `RuntimeManager.startTask` creates one per
+  run, and `restoreCheckpoint` reverts every later recorded change via
+  `FileChangeReviewManager` then truncates the later checkpoints. Header
+  popover (`checkpoints-btn` → `GET_CHECKPOINTS` / `RESTORE_CHECKPOINT` →
+  `CHECKPOINTS`).
+- **A4 inline diff review:** `src/runtime/review/hunkReview.ts` (pure:
+  `buildHunkLenses`, `revertHunk`). `DiffViewService` attaches CodeLens
+  "Keep/Reject hunk" + "Keep/Revert all" over the modified document; rejecting
+  a hunk rewrites only that hunk from the pre-change bytes.
+  `RuntimeManager.showFileChangeDiff` now also passes `beforeContent` (the
+  diff's left pane used to be empty).
 
 ### GUI ↔ backend communication
 `GuiToHost` messages (SEND_PROMPT, NEW_SESSION, SELECT_SESSION,
@@ -988,6 +1041,10 @@ compress content). Section state: `AppState.settingsSection`.
 8. Do not expose private chain-of-thought; only safe progress/status lines
    reach the Thinking UI (enforced by classification gates + tests).
 9. Do not silently fall back from agent/tool mode to plain chat.
+10. Subagents are workers, not orchestrators: they run read-only through the
+    `subagent` mode, never nest (`run_subagent` is excluded from that set), and
+    their tool calls still pass through ToolRouter + permissions — never a
+    direct/parallel tool path.
 10. Preserve `tool_call_id` relationships; never strip/regenerate ids.
 11. Do not rename internal identifiers (`codeviaCursor*`, `CodeviaSession`,
     package name, storage keys) — display name only is "Spider".
@@ -1091,6 +1148,10 @@ compress content). Section state: `AppState.settingsSection`.
 ## 15. Known Bugs / Limitations
 
 ### Fixed
+- **Diff review showed an empty original and offered no per-hunk actions
+  (2026-10-06):** `showFileChangeDiff` never passed `beforeContent`, so an
+  edited file diffed against nothing, and review was whole-file only. Fixed
+  by `FileChangeReviewManager.getSnapshot` + the CodeLens hunk review (A4).
 - **Transcript writes were not durable at the end of a run:** appends are
   queued per event and were never awaited, so a transcript read immediately
   after `startTask` could observe a half-persisted run (flaky tests, and a
