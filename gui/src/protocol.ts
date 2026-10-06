@@ -43,6 +43,10 @@ export type GuiToHost =
   /** History tab: permanently removes a conversation and its transcript. */
   | { type: "DELETE_SESSION"; sessionId: string }
   | { type: "GET_TRANSCRIPT"; sessionId: string }
+  /** Workspace checkpoints for a conversation (A2). */
+  | { type: "GET_CHECKPOINTS"; sessionId: string }
+  /** Rolls the workspace back to a checkpoint and returns the new timeline. */
+  | { type: "RESTORE_CHECKPOINT"; checkpointId: string }
   | { type: "GET_RUNTIME_STATUS" }
   | { type: "SELECT_RUNTIME"; provider: RuntimeProvider; modelId?: string }
   | { type: "DISCOVER_LOCAL_MODELS"; provider?: LocalProvider }
@@ -80,6 +84,14 @@ export interface SessionListItem {
 export type PermissionRuleCategory = "READ" | "MODIFY" | "EXECUTE" | "EXTERNAL" | "DESTRUCTIVE";
 /** Per-category default: auto-allow, always ask, or always deny. */
 export type PermissionRule = "allow" | "ask" | "deny";
+
+/** One workspace checkpoint in the session timeline (A2). */
+export interface CheckpointView {
+  id: string;
+  label: string;
+  timestamp: number;
+  changeCount: number;
+}
 
 /** Static extension metadata for Settings → About Spider. */
 export interface ExtensionInfoView {
@@ -120,7 +132,7 @@ export interface TodoItemView {
 
 export type HostToGui =
   | { type: "AGENT_STATE"; state: string }
-  | { type: "AGENT_MESSAGE"; message: string; messageId?: string }
+  | { type: "AGENT_MESSAGE"; message: string; messageId?: string; timestamp?: number; modelName?: string }
   | { type: "AGENT_TEXT_DELTA"; sessionId: string; text: string }
   | { type: "AGENT_USAGE"; promptTokens: number; completionTokens: number; totalTokens: number; costUsd?: number; partial?: boolean }
   | { type: "FILE_CHANGE"; change: FileChangeView }
@@ -132,6 +144,7 @@ export type HostToGui =
   | { type: "AGENT_ERROR"; error: string }
   | { type: "PERMISSION_REQUEST"; requestId: string; message: string; command?: string; category?: string; destructive?: boolean }
   | { type: "SESSION_UPDATED"; sessions: SessionListItem[]; activeSessionId?: string }
+  | { type: "CHECKPOINTS"; sessionId: string; items: CheckpointView[] }
   | { type: "AUTO_APPROVE_STATE"; enabled: boolean; scope: "conversation" | "runtime" }
   | { type: "PERMISSION_RULES"; rules: Record<PermissionRuleCategory, PermissionRule> }
   /** `ask_user`: a question the agent is waiting on (correlated by requestId). */
@@ -161,6 +174,7 @@ export type HostToGui =
         kind: "user" | "assistant" | "thinking" | "tool" | "command" | "error" | "system";
         text: string;
         timestamp: number;
+        modelName?: string;
         toolName?: string;
         command?: string;
         path?: string;

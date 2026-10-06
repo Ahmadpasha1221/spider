@@ -12,7 +12,18 @@
  * The bottom toolbar hosts the fast-path controls: the active-model selector
  * (per-provider catalog, same underlying state as Settings) and the shield
  * toggle for the temporary runtime auto-approve (backend authoritative).
+ *
+ * Slash commands (A6): typing `/` at the start of the input opens a filterable
+ * command menu. Selecting one fills `/<name> ` and the prompt is expanded to
+ * its template on send, so the model gets a real instruction.
  */
+import {
+  BUILTIN_SLASH_COMMANDS,
+  expandSlashCommand,
+  filterSlashCommands,
+  type SlashCommand,
+} from "../slashCommands";
+
 export interface ComposerModelOption {
   id: string;
   name: string;
@@ -34,6 +45,8 @@ export interface ComposerHandle {
   }): void;
   /** Fill the input programmatically (used by empty-state suggestion chips). */
   setPrompt(text: string): void;
+  /** Replace the available slash commands (built-ins + any host-provided). */
+  setSlashCommands(commands: readonly SlashCommand[]): void;
 }
 
 export function createComposer(
@@ -44,6 +57,8 @@ export function createComposer(
     onModelSelect?: (modelId: string) => void;
     /** Shield toggle intent; the backend confirms via AUTO_APPROVE_STATE. */
     onToggleAutoApprove?: (enabled: boolean) => void;
+    /** Slash commands shown in the composer menu (defaults to built-ins). */
+    slashCommands?: readonly SlashCommand[];
   },
 ): ComposerHandle {
   root.replaceChildren();
@@ -73,8 +88,9 @@ export function createComposer(
     if (textarea.value.trim().length === 0 || textarea.disabled) {
       return;
     }
-    options.onSend(textarea.value);
+    options.onSend(expandSlashCommand(textarea.value, slashCommands));
     textarea.value = "";
+    closeSlashMenu();
     sync(true);
     textarea.focus();
   });
@@ -111,8 +127,16 @@ export function createComposer(
     options.onToggleAutoApprove?.(!current.autoApproveEnabled);
   });
 
+  // Slash-command menu: absolutely positioned above the input, built once and
+  // only shown/hidden — never re-created while the pointer is over it.
+  const slashMenu = document.createElement("div");
+  slashMenu.className = "slash-menu";
+  slashMenu.setAttribute("role", "listbox");
+  slashMenu.setAttribute("aria-label", "Slash commands");
+  slashMenu.hidden = true;
+
   toolbar.append(modelWrap, shield);
-  input.append(textarea, primary);
+  input.append(slashMenu, textarea, primary);
   root.append(input, toolbar);
 
   const current = {
@@ -125,6 +149,88 @@ export function createComposer(
     autoApproveEnabled: false,
     shieldVisible: false,
   };
+
+  let slashCommands: readonly SlashCommand[] = options.slashCommands ?? BUILTIN_SLASH_COMMANDS;
+  let slashMatches: readonly SlashCommand[] = [];
+  let slashIndex = 0;
+  let slashOpen = false;
+
+  /** The partial command name being typed, or undefined when the menu is out. */
+  function slashQuery(value: string): string | undefined {
+    const match = /^\/([A-Za-z0-9_-]*)$/.exec(value);
+    return match ? match[1]! : undefined;
+  }
+
+  function closeSlashMenu(): void {
+    if (!slashOpen) {
+      return;
+    }
+    slashOpen = false;
+    slashMatches = [];
+    slashIndex = 0;
+    slashMenu.hidden = true;
+    slashMenu.replaceChildren();
+  }
+
+  function acceptSlashCommand(command: SlashCommand): void {
+    textarea.value = `/${command.name} `;
+    closeSlashMenu();
+    sync();
+    textarea.focus();
+  }
+
+  function updateSlashMenu(): void {
+    const query = slashQuery(textarea.value);
+    if (query === undefined) {
+      closeSlashMenu();
+      return;
+    }
+    const matches = filterSlashCommands(query, slashCommands);
+    if (matches.length === 0) {
+      closeSlashMenu();
+      return;
+    }
+    slashMatches = matches;
+    slashIndex = Math.min(slashIndex, matches.length - 1);
+    slashOpen = true;
+    slashMenu.hidden = false;
+    slashMenu.replaceChildren(
+      ...matches.map((command, index) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "slash-item";
+        item.setAttribute("role", "option");
+        item.setAttribute("aria-selected", String(index === slashIndex));
+        item.classList.toggle("is-active", index === slashIndex);
+        const name = document.createElement("span");
+        name.className = "slash-name";
+        name.textContent = `/${command.name}`;
+        const desc = document.createElement("span");
+        desc.className = "slash-desc";
+        desc.textContent = command.description;
+        item.append(name, desc);
+        // mousedown (not click): the textarea blurs on mousedown, which would
+        // close the menu before click fires.
+        item.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          acceptSlashCommand(command);
+        });
+        return item;
+      }),
+    );
+  }
+
+  function moveSlashSelection(delta: number): void {
+    if (slashMatches.length === 0) {
+      return;
+    }
+    slashIndex = (slashIndex + delta + slashMatches.length) % slashMatches.length;
+    const items = slashMenu.querySelectorAll<HTMLElement>(".slash-item");
+    items.forEach((item, index) => {
+      item.classList.toggle("is-active", index === slashIndex);
+      item.setAttribute("aria-selected", String(index === slashIndex));
+    });
+  }
 
   let lastModelKey = "";
   // Guarded writes: every DOM mutation below is conditional on the value
@@ -167,6 +273,10 @@ export function createComposer(
 
   function sync(force = false): void {
     const inputDisabled = current.disabled || current.running;
+    if (inputDisabled) {
+      // A disabled/streaming composer cannot send a command: dismiss the menu.
+      closeSlashMenu();
+    }
     if (force || textarea.disabled !== inputDisabled) {
       textarea.disabled = inputDisabled;
     }
@@ -202,13 +312,42 @@ export function createComposer(
     syncModelSelect();
   }
 
-  textarea.addEventListener("input", () => sync());
+  textarea.addEventListener("input", () => {
+    sync();
+    updateSlashMenu();
+  });
   textarea.addEventListener("keydown", (event) => {
+    if (slashOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        moveSlashSelection(1);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        moveSlashSelection(-1);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        const chosen = slashMatches[slashIndex];
+        if (chosen) {
+          event.preventDefault();
+          acceptSlashCommand(chosen);
+          return;
+        }
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSlashMenu();
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       if (!textarea.disabled && !current.running && textarea.value.trim().length > 0) {
-        options.onSend(textarea.value);
+        options.onSend(expandSlashCommand(textarea.value, slashCommands));
         textarea.value = "";
+        closeSlashMenu();
         sync();
         textarea.focus();
       }
@@ -238,6 +377,11 @@ export function createComposer(
       textarea.disabled = false;
       sync();
       textarea.focus();
+    },
+    setSlashCommands(next): void {
+      slashCommands = next.length > 0 ? next : BUILTIN_SLASH_COMMANDS;
+      slashIndex = 0;
+      updateSlashMenu();
     },
   };
 }

@@ -39,6 +39,9 @@ const newSessionBtn = mustEl("new-session-btn") as HTMLButtonElement;
 const sessionBtn = mustEl("session-btn") as HTMLButtonElement;
 const sessionBtnTitle = mustEl("session-btn-title") as HTMLSpanElement;
 const sessionMenu = mustEl("session-menu") as HTMLDivElement;
+// Workspace checkpoint timeline (A2): a header popover over the active session.
+const checkpointsBtn = mustEl("checkpoints-btn") as HTMLButtonElement;
+const checkpointsMenu = mustEl("checkpoints-menu") as HTMLDivElement;
 const setupBanner = mustEl("setup-banner");
 const settingsView = mustEl("settings-view");
 const chatView = mustEl("chat-view");
@@ -100,20 +103,37 @@ sessionBtn.addEventListener("click", () => {
     openSessionMenu();
   }
 });
+checkpointsBtn.addEventListener("click", () => {
+  if (checkpointsMenuOpen) {
+    closeCheckpointsMenu();
+  } else {
+    openCheckpointsMenu();
+  }
+});
 document.addEventListener("pointerdown", (event) => {
   const target = event.target;
-  if (
-    sessionMenuOpen
-    && target instanceof Node
-    && !sessionBtn.contains(target)
-    && !sessionMenu.contains(target)
-  ) {
+  if (!(target instanceof Node)) {
+    return;
+  }
+  if (sessionMenuOpen && !sessionBtn.contains(target) && !sessionMenu.contains(target)) {
     closeSessionMenu();
+  }
+  if (
+    checkpointsMenuOpen
+    && !checkpointsBtn.contains(target)
+    && !checkpointsMenu.contains(target)
+  ) {
+    closeCheckpointsMenu();
   }
 });
 document.addEventListener("keydown", (event) => {
-  if (sessionMenuOpen && event.key === "Escape") {
-    closeSessionMenu();
+  if (event.key === "Escape") {
+    if (sessionMenuOpen) {
+      closeSessionMenu();
+    }
+    if (checkpointsMenuOpen) {
+      closeCheckpointsMenu();
+    }
   }
 });
 // Clicking the Spider logo opens (or focuses) the Spider editor tab.
@@ -232,6 +252,17 @@ function handleHostMessage(message: HostToGui): void {
     case "SESSION_UPDATED":
       applySessionUpdate(message.sessions, message.activeSessionId);
       break;
+    case "CHECKPOINTS": {
+      // Only the active conversation's timeline is shown, so a late reply for
+      // another session can never repaint the menu.
+      if (!message.sessionId || message.sessionId === state.activeSessionId) {
+        state.checkpoints = message.items;
+        if (checkpointsMenuOpen) {
+          buildCheckpointsMenu();
+        }
+      }
+      break;
+    }
     case "AUTO_APPROVE_STATE":
       // Backend is authoritative: the GUI mirrors whatever it confirms.
       state.autoApproveEnabled = message.enabled;
@@ -252,6 +283,8 @@ function handleHostMessage(message: HostToGui): void {
       loadedTranscriptSessionId = message.sessionId;
       state.messages = message.entries.map(toChatLine);
       messageList.replaceAll(state.messages);
+      state.checkpoints = [];
+      postToHost({ type: "GET_CHECKPOINTS", sessionId: message.sessionId });
       render();
       break;
     }
@@ -267,7 +300,10 @@ function handleHostMessage(message: HostToGui): void {
         messageList.finishStreamingLine("");
         break;
       }
-      messageList.finishStreamingLine(text, message.messageId);
+      messageList.finishStreamingLine(text, message.messageId, {
+        ...(message.timestamp !== undefined ? { timestamp: message.timestamp } : {}),
+        ...(message.modelName ? { modelName: message.modelName } : {}),
+      });
       chatLineChanged = true;
       break;
     }
@@ -451,6 +487,10 @@ function applySessionUpdate(sessions: SessionListItem[], activeSessionId?: strin
     }
     return;
   }
+  if (state.activeSessionId !== hostActive) {
+    // Conversation changed: the previous timeline no longer applies.
+    state.checkpoints = [];
+  }
   state.activeSessionId = hostActive;
   if (state.activeSessionId && loadedTranscriptSessionId !== state.activeSessionId) {
     postToHost({ type: "GET_TRANSCRIPT", sessionId: state.activeSessionId });
@@ -538,6 +578,11 @@ function render(): void {
     if (newSessionBtn.disabled !== state.running) {
       newSessionBtn.disabled = state.running;
     }
+    // Checkpoints are per-conversation: unavailable without an active one.
+    const noSession = !state.activeSessionId;
+    if (checkpointsBtn.disabled !== noSession) {
+      checkpointsBtn.disabled = noSession;
+    }
     renderChatView(
       { composer },
       state,
@@ -564,6 +609,7 @@ function setTextOnce(el: HTMLElement, text: string): void {
 let sessionMenuOpen = false;
 
 function openSessionMenu(): void {
+  closeCheckpointsMenu();
   sessionMenuOpen = true;
   sessionMenu.hidden = false;
   sessionBtn.setAttribute("aria-expanded", "true");
@@ -614,6 +660,65 @@ function buildSessionMenu(): void {
     return item;
   });
   sessionMenu.replaceChildren(...items);
+}
+
+/**
+ * Workspace checkpoints (A2). The list mirrors the host's timeline for the
+ * active conversation; opening the menu refreshes it, and a restore re-reads
+ * the surviving timeline from the host's reply.
+ */
+let checkpointsMenuOpen = false;
+
+function openCheckpointsMenu(): void {
+  if (!state.activeSessionId) {
+    return;
+  }
+  closeSessionMenu();
+  checkpointsMenuOpen = true;
+  checkpointsMenu.hidden = false;
+  checkpointsBtn.setAttribute("aria-expanded", "true");
+  buildCheckpointsMenu();
+  postToHost({ type: "GET_CHECKPOINTS", sessionId: state.activeSessionId });
+}
+
+function closeCheckpointsMenu(): void {
+  if (!checkpointsMenuOpen) {
+    return;
+  }
+  checkpointsMenuOpen = false;
+  checkpointsMenu.hidden = true;
+  checkpointsBtn.setAttribute("aria-expanded", "false");
+}
+
+function buildCheckpointsMenu(): void {
+  const items = [...state.checkpoints].reverse();
+  if (items.length === 0) {
+    const note = document.createElement("p");
+    note.className = "session-menu-empty";
+    note.textContent = "No checkpoints yet. One is created at the start of every run.";
+    checkpointsMenu.replaceChildren(note);
+    return;
+  }
+  checkpointsMenu.replaceChildren(
+    ...items.map((checkpoint) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "session-menu-item";
+      item.setAttribute("role", "option");
+      const title = document.createElement("span");
+      title.className = "session-menu-item-title";
+      title.textContent = checkpoint.label;
+      const meta = document.createElement("span");
+      meta.className = "session-menu-item-meta";
+      meta.textContent = `Restore workspace · ${formatAge(checkpoint.timestamp)}`;
+      item.append(title, meta);
+      item.addEventListener("click", () => {
+        closeCheckpointsMenu();
+        postToHost({ type: "RESTORE_CHECKPOINT", checkpointId: checkpoint.id });
+      });
+      return item;
+    }),
+  );
 }
 
 function historyBasename(fsPath: string): string {
@@ -891,7 +996,7 @@ function sendPrompt(prompt: string): void {
   // The id is generated here and echoed back with the prompt, so the message
   // has one stable identity in both the UI and the persisted transcript.
   const messageId = newMessageId();
-  const line: ChatLine = { role: "user", text: trimmed, messageId };
+  const line: ChatLine = { role: "user", text: trimmed, messageId, timestamp: Date.now() };
   state.messages.push(line);
   messageList.append([line]);
   postToHost({ type: "SEND_PROMPT", prompt: trimmed, sessionId: state.activeSessionId, messageId });
@@ -915,17 +1020,26 @@ function toChatLine(entry: {
   id?: string;
   kind: "user" | "assistant" | "thinking" | "tool" | "command" | "error" | "system";
   text: string;
+  timestamp?: number;
+  modelName?: string;
   toolName?: string;
   command?: string;
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
 }): ChatLine {
+  const time = entry.timestamp !== undefined ? { timestamp: entry.timestamp } : {};
   switch (entry.kind) {
     case "user":
-      return { role: "user", text: entry.text, ...(entry.id ? { messageId: entry.id } : {}) };
+      return { role: "user", text: entry.text, ...(entry.id ? { messageId: entry.id } : {}), ...time };
     case "assistant":
-      return { role: "agent", text: entry.text, ...(entry.id ? { messageId: entry.id } : {}) };
+      return {
+        role: "agent",
+        text: entry.text,
+        ...(entry.id ? { messageId: entry.id } : {}),
+        ...time,
+        ...(entry.modelName ? { modelName: entry.modelName } : {}),
+      };
     case "thinking":
       return { role: "thinking", text: entry.text };
     case "error":

@@ -44,8 +44,14 @@ export interface MessageListHandle {
   /**
    * Finalize the streaming line into a normal agent line. `messageId` is the
    * transcript entry id, so the finalized reply can be copied or deleted.
+   * `meta` carries the per-message metadata (timestamp/model) shown under the
+   * reply (A8).
    */
-  finishStreamingLine(finalText: string, messageId?: string): void;
+  finishStreamingLine(
+    finalText: string,
+    messageId?: string,
+    meta?: { timestamp?: number; modelName?: string },
+  ): void;
   /**
    * Closes the current streaming turn (flush + reset the accumulator) without
    * removing the painted text. Called at turn boundaries (tool calls, thinking
@@ -141,6 +147,18 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
     });
   }
 
+  /** Message chrome: role label plus optional time and producing model (A8). */
+  function metaText(message: ChatLine): string {
+    const parts = [labelFor(message)];
+    if (message.timestamp) {
+      parts.push(formatMessageTime(message.timestamp));
+    }
+    if (message.role === "agent" && message.modelName) {
+      parts.push(message.modelName);
+    }
+    return parts.join(" · ");
+  }
+
   function labelFor(message: ChatLine): string {
     switch (message.role) {
       case "user":
@@ -163,7 +181,7 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
     article.className = `message message-${message.role}`;
     const meta = document.createElement("span");
     meta.className = "message-meta";
-    meta.textContent = labelFor(message);
+    meta.textContent = metaText(message);
     const body = document.createElement("div");
     body.className = "message-body";
     if (message.role === "agent") {
@@ -489,10 +507,17 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
       streamText = "";
     },
 
-    finishStreamingLine(finalText, messageId) {
+    finishStreamingLine(finalText, messageId, meta) {
       // Release any text still held by the coalescer before deciding what to
       // keep, so the comparison below sees the fully painted state.
       coalescer.close();
+      const line: ChatLine = {
+        role: "agent",
+        text: finalText,
+        timestamp: meta?.timestamp ?? Date.now(),
+        ...(messageId ? { messageId } : {}),
+        ...(meta?.modelName ? { modelName: meta.modelName } : {}),
+      };
       if (streamingLine && streamingLine.isConnected) {
         const streamedText = streamText;
         // Nothing visible was streamed and nothing final arrived: drop the
@@ -509,20 +534,17 @@ export function createMessageList(root: HTMLElement, initialHandlers?: MessageLi
               renderMarkdownInto(body, finalText);
             }
           }
-          attachMessageActions(streamingLine, {
-            role: "agent",
-            text: finalText,
-            ...(messageId ? { messageId } : {}),
-          });
+          // Fill in the message chrome now that the turn is final (time/model).
+          const metaEl = streamingLine.querySelector<HTMLElement>(".message-meta");
+          if (metaEl) {
+            metaEl.textContent = metaText(line);
+          }
+          attachMessageActions(streamingLine, line);
         }
       } else if (finalText.length > 0) {
-        const { article } = buildBaseLine({ role: "agent", text: finalText });
+        const { article } = buildBaseLine(line);
         root.appendChild(article);
-        attachMessageActions(article, {
-          role: "agent",
-          text: finalText,
-          ...(messageId ? { messageId } : {}),
-        });
+        attachMessageActions(article, line);
         scheduleScroll();
       }
       streamingLine = undefined;
@@ -852,6 +874,17 @@ function fileChangeActions(
 
   actions.append(view, accept, reject);
   return actions;
+}
+
+/** Local wall-clock time for a message, e.g. `14:32`. */
+function formatMessageTime(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
 }
 
 /** Finished command output longer than this collapses to a compact block. */
