@@ -51,6 +51,7 @@ describe("tool availability (current available-tool set)", () => {
       "find_references",
       "get_problems",
       "run_tests",
+      "run_subagent",
       "finish",
     ]);
   });
@@ -99,6 +100,25 @@ describe("tool availability (current available-tool set)", () => {
         expect(agent.has(name)).toBe(true);
       }
     }
+  });
+
+  it("gives subagents a read-only set with no interactive or spawn tools", () => {
+    const tools = availableToolNames("subagent");
+    // Read/search/inspect tools are available.
+    for (const name of ["read_file", "list_files", "grep_search", "codebase_search", "repo_map", "list_symbols", "get_problems", "finish"]) {
+      expect(tools).toContain(name);
+    }
+    // Writes, commands, user interaction, plan mutation and nesting are not.
+    for (const name of ["write_file", "edit_file", "delete_file", "run_command", "run_tests", "background_command", "ask_user", "update_todo", "run_subagent"]) {
+      expect(tools).not.toContain(name);
+    }
+  });
+
+  it("keeps run_subagent out of the read-only modes", () => {
+    for (const mode of ["ask", "plan"] as const) {
+      expect(availableToolNames(mode)).not.toContain("run_subagent");
+    }
+    expect(availableToolNames("agent")).toContain("run_subagent");
   });
 
   it("answers per-tool availability queries", () => {
