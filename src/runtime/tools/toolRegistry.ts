@@ -689,7 +689,7 @@ const TOOLS: readonly RegisteredTool[] = [
   }),
   workspaceTool({
     name: "update_todo",
-    description: `Create or update the plan for the current task (maximum ${MAX_TODO_ITEMS} items, titles up to ${MAX_TODO_TITLE_LENGTH} characters).`,
+    description: `Create or update the plan for the current task. Keep plans proportional to the user request (simple tasks: 1-3 steps; medium: 3-7 steps; never invent unrequested features like PWA, sound effects, or polish). Exactly one task may be in_progress. Maximum ${MAX_TODO_ITEMS} items, titles up to ${MAX_TODO_TITLE_LENGTH} characters.`,
     permission: "safe",
     category: "workflow",
     parameters: {
@@ -703,7 +703,10 @@ const TOOLS: readonly RegisteredTool[] = [
             properties: {
               id: { type: "string", description: "Stable id, unique within the plan." },
               title: { type: "string", description: "Short description of the step." },
-              status: { type: "string", enum: ["pending", "in_progress", "completed", "cancelled"], description: "Current step state." },
+              status: { type: "string", enum: ["pending", "in_progress", "completed", "failed", "blocked", "cancelled"], description: "Current step state." },
+              order: { type: "number", description: "1-based order in the plan." },
+              error: { type: "string", description: "Error details if status is failed." },
+              blockedReason: { type: "string", description: "Blockage reason if status is blocked." },
             },
             required: ["id", "title", "status"],
           },

@@ -204,4 +204,69 @@ describe("MessageRouter", () => {
 
     expect(result).toEqual({ success: true });
   });
+
+  it("routes GET_CHECKPOINTS to runtimeManager.listCheckpoints", async () => {
+    const agentManager = {} as unknown as AgentManager;
+    const runtimeManager = {
+      listCheckpoints: vi.fn().mockReturnValue([
+        { id: "cp-1", label: "Initial state", timestamp: 1000, changeCount: 0 },
+      ]),
+    };
+
+    const router = new MessageRouter(agentManager, ".", undefined, undefined, runtimeManager as never);
+    const result = await router.handleMessage({ type: "GET_CHECKPOINTS", sessionId: "session-1" });
+
+    expect(runtimeManager.listCheckpoints).toHaveBeenCalledWith("session-1");
+    expect(result).toEqual({
+      type: "CHECKPOINTS",
+      sessionId: "session-1",
+      items: [{ id: "cp-1", label: "Initial state", timestamp: 1000, changeCount: 0 }],
+    });
+  });
+
+  it("routes RESTORE_CHECKPOINT to runtimeManager.restoreCheckpoint", async () => {
+    const agentManager = {} as unknown as AgentManager;
+    const runtimeManager = {
+      restoreCheckpoint: vi.fn().mockResolvedValue({
+        sessionId: "session-1",
+        items: [{ id: "cp-1", label: "Initial state", timestamp: 1000, changeCount: 0 }],
+      }),
+    };
+
+    const router = new MessageRouter(agentManager, ".", undefined, undefined, runtimeManager as never);
+    const result = await router.handleMessage({ type: "RESTORE_CHECKPOINT", checkpointId: "cp-1" });
+
+    expect(runtimeManager.restoreCheckpoint).toHaveBeenCalledWith("cp-1");
+    expect(result).toEqual({
+      type: "CHECKPOINTS",
+      sessionId: "session-1",
+      items: [{ id: "cp-1", label: "Initial state", timestamp: 1000, changeCount: 0 }],
+    });
+  });
+
+  it("rejects malformed GET_CHECKPOINTS and RESTORE_CHECKPOINT messages", async () => {
+    const router = new MessageRouter({} as unknown as AgentManager);
+
+    await expect(router.handleMessage({ type: "GET_CHECKPOINTS" })).rejects.toThrow("Invalid GET_CHECKPOINTS message");
+    await expect(router.handleMessage({ type: "GET_CHECKPOINTS", sessionId: 123 })).rejects.toThrow("Invalid GET_CHECKPOINTS message");
+    await expect(router.handleMessage({ type: "RESTORE_CHECKPOINT" })).rejects.toThrow("Invalid RESTORE_CHECKPOINT message");
+    await expect(router.handleMessage({ type: "RESTORE_CHECKPOINT", checkpointId: null })).rejects.toThrow("Invalid RESTORE_CHECKPOINT message");
+  });
+
+  it("validates and accepts OPEN_HISTORY and DELETE_SESSION", async () => {
+    const agentManager = {
+      deleteSession: vi.fn().mockResolvedValue(undefined),
+    } as unknown as AgentManager;
+    const router = new MessageRouter(agentManager);
+
+    const historyResult = await router.handleMessage({ type: "OPEN_HISTORY" });
+    expect(historyResult).toEqual({ success: true });
+
+    const deleteResult = await router.handleMessage({ type: "DELETE_SESSION", sessionId: "session-1" });
+    expect(deleteResult).toEqual({ success: true });
+    expect(agentManager.deleteSession).toHaveBeenCalledWith("session-1");
+
+    await expect(router.handleMessage({ type: "DELETE_SESSION" })).rejects.toThrow("Invalid DELETE_SESSION message");
+  });
 });
+

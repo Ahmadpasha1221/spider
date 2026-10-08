@@ -467,15 +467,244 @@ h2 { font-size: 13px; margin-bottom: 4px; }
   .settings-heading .btn { align-self: flex-start; }
 }
 
-/* Phase 3: task-plan panel and ask_user prompt. */
-.todo-panel { position: fixed; right: 10px; bottom: 10px; max-width: 320px; max-height: 40vh; overflow: auto; padding: 8px 10px; background: var(--vscode-editorWidget-background, #252526); border: 1px solid var(--border); border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.35); z-index: 20; }
-.todo-panel-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); margin-bottom: 6px; }
-.todo-panel-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.todo-item { display: flex; gap: 6px; align-items: baseline; font-size: 12px; }
-.todo-status { width: 12px; color: var(--muted); }
-.todo-item.todo-completed .todo-title { text-decoration: line-through; color: var(--muted); }
-.todo-item.todo-in_progress .todo-status { color: var(--vscode-testing-iconPassed, #73c991); }
-.todo-item.todo-cancelled .todo-title { color: var(--muted); text-decoration: line-through; }
+/* Persistent compact Task Header and Expandable Panel (Cline / OpenHands pattern) */
+.task-plan-root {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  width: 100%;
+  margin-bottom: 6px;
+}
+.task-plan-root[hidden] {
+  display: none;
+}
+
+.task-plan-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.task-header-btn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--card-bg, #252526);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.task-header-btn:hover {
+  background: color-mix(in srgb, var(--accent) 8%, var(--card-bg, #252526));
+}
+.task-header-btn:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.task-header-btn.is-expanded {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+.task-header-btn.has-blocked {
+  border-color: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 60%, var(--border));
+}
+.task-header-btn.has-failed {
+  border-color: color-mix(in srgb, var(--vscode-testing-iconFailed, #f14c4c) 60%, var(--border));
+}
+
+.task-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.task-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.task-progress-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  flex-shrink: 0;
+}
+
+.task-divider {
+  color: var(--muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.task-current-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.task-current-icon {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.task-current-text {
+  font-size: 12px;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+
+.task-percent-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.task-chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  transition: transform 0.2s ease;
+}
+.task-chevron.is-expanded {
+  transform: rotate(180deg);
+}
+
+.task-plan-panel {
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: var(--card-bg, #252526);
+  padding: 6px 10px 10px;
+  max-height: 240px;
+  overflow-y: auto;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.task-plan-meta {
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+.task-meta-text {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.task-plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.task-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 2px 0;
+}
+
+.task-row-icon {
+  width: 14px;
+  text-align: center;
+  font-size: 12px;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.task-row-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.task-row-title {
+  word-break: break-word;
+}
+
+.task-row.task-completed .task-row-title {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+
+.task-row.task-in_progress .task-row-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.task-row-detail {
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.task-error-box {
+  background: color-mix(in srgb, var(--vscode-testing-iconFailed, #f14c4c) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-testing-iconFailed, #f14c4c) 40%, transparent);
+  color: var(--vscode-testing-iconFailed, #f14c4c);
+}
+
+.task-blocked-box {
+  background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 40%, transparent);
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+
+.status-completed {
+  color: var(--vscode-testing-iconPassed, #73c991);
+}
+.status-in_progress {
+  color: var(--vscode-charts-blue, #3794ff);
+}
+.status-pending {
+  color: var(--muted);
+}
+.status-failed {
+  color: var(--vscode-testing-iconFailed, #f14c4c);
+}
+.status-blocked {
+  color: var(--vscode-editorWarning-foreground, #cca700);
+}
+.status-cancelled {
+  color: var(--muted);
+}
 .question-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.45); display: flex; align-items: center; justify-content: center; z-index: 40; }
 .question-card { width: min(420px, 90vw); padding: 14px; background: var(--vscode-editorWidget-background, #252526); border: 1px solid var(--border); border-radius: 4px; display: flex; flex-direction: column; gap: 8px; }
 .question-context { margin: 0; font-size: 12px; color: var(--muted); }

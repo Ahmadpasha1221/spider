@@ -136,11 +136,15 @@ export interface UserQuestionOptionView {
   description?: string;
 }
 
-/** One task-plan row (sanitized; the host owns the authoritative plan). */
 export interface TodoItemView {
   id: string;
   title: string;
-  status: "pending" | "in_progress" | "completed" | "cancelled";
+  status: "pending" | "in_progress" | "completed" | "failed" | "blocked" | "cancelled";
+  order?: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
+  blockedReason?: string;
 }
 
 export type ExtensionMessage =

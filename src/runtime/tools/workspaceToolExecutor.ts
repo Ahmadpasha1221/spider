@@ -36,6 +36,10 @@ import type { DiagnosticsSource } from "../diagnostics/diagnosticsSource";
 import { ToolExecutionError } from "./toolError";
 import { normalizeSubagentInput, type SubagentRunner } from "./subagent";
 import { isProbablyBinary, SEARCH_LIMITS, walkWorkspace } from "./workspaceSearch";
+import { SourceTracingManager } from "../validation/sourceTracing";
+import { validateSourceIntegrity, type SourceValidationDiagnostic } from "../validation/sourceIntegrityValidator";
+import { validateDependencies } from "../validation/dependencyValidator";
+import { ValidationGate } from "../validation/validationGate";
 
 const MAX_SEARCH_MATCHES = 50;
 const MAX_LIST_ENTRIES = 200;
@@ -169,13 +173,14 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
           this.git,
         );
       case "write_file":
-        return this.writeFile(workspacePath, requiredString(input, "path"), requiredString(input, "content"));
+        return this.writeFile(workspacePath, requiredString(input, "path"), requiredString(input, "content"), context);
       case "edit_file":
         return this.editFile(
           workspacePath,
           requiredString(input, "path"),
           requiredString(input, "old_string"),
           requiredString(input, "new_string"),
+          context,
         );
       case "create_directory":
         return this.createDirectory(workspacePath, requiredString(input, "path"));
@@ -385,21 +390,248 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     };
   }
 
-  private async writeFile(workspacePath: string, requested: string, content: string): Promise<unknown> {
+  private async writeFile(
+    workspacePath: string,
+    requested: string,
+    content: string,
+    context?: RuntimeToolExecutorContext,
+  ): Promise<unknown> {
     const target = await resolveWorkspacePathSafe(workspacePath, requested);
+    const sessionId = context?.session.sessionId ?? "unknown";
+
+    SourceTracingManager.getInstance().record({
+      sessionId,
+      tool: "write_file",
+      boundary: "FILE_WRITE_REQUEST",
+      file: requested,
+      contentHash: SourceTracingManager.getInstance().computeHash(content),
+      contentLength: content.length,
+    });
+
+    context?.validationGate?.recordFileEdit(requested);
+
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, content, "utf8");
-    return { path: requested, written: true, bytes: Buffer.byteLength(content, "utf8") };
+
+    const readBack = await fs.readFile(target, "utf8");
+    const readBackHash = SourceTracingManager.getInstance().computeHash(readBack);
+
+    SourceTracingManager.getInstance().record({
+      sessionId,
+      tool: "write_file",
+      boundary: "FILE_WRITE_COMPLETED",
+      file: requested,
+      contentHash: readBackHash,
+      contentLength: readBack.length,
+    });
+
+    if (readBack !== content) {
+      throw new ToolExecutionError(
+        "internal_error",
+        `Filesystem read-back mismatch: bytes read back from ${requested} do not match the intended write content.`,
+      );
+    }
+
+    const integrityResult = validateSourceIntegrity(target, readBack);
+    const dependencyResult = await validateDependencies(workspacePath, target, readBack);
+    const allDiagnostics: SourceValidationDiagnostic[] = [
+      ...integrityResult.diagnostics,
+      ...dependencyResult.diagnostics,
+    ];
+
+    const hasErrors = allDiagnostics.some((d) => d.severity === "error");
+    if (hasErrors) {
+      const gateResult = context?.validationGate?.recordValidationFailure(
+        requested,
+        allDiagnostics,
+        readBackHash,
+      );
+
+      SourceTracingManager.getInstance().record({
+        sessionId,
+        tool: "write_file",
+        boundary: "VALIDATION_RESULT",
+        file: requested,
+        validationStatus: "failed",
+        errorCategory: integrityResult.failureCategory ?? "dependency_error",
+        metadata: { diagnostics: allDiagnostics.map((d) => d.message) },
+      });
+
+      const formattedErrors = allDiagnostics
+        .filter((d) => d.severity === "error")
+        .map((d) => `Line ${d.line ?? "?"}, Col ${d.character ?? "?"}: ${d.message}${d.snippet ? `\n  > ${d.snippet}` : ""}`)
+        .join("\n");
+
+      const repairGuidance = gateResult?.isBlocked
+        ? `\nValidation gate is BLOCKED: maximum repair attempts (${ValidationGate.MAX_REPAIR_ATTEMPTS}) exceeded.`
+        : `\n\nSelf-Correction Guidance:
+1. What failed: Deterministic syntax/import validation failed for ${requested}.
+2. Exact diagnostic:
+${formattedErrors}
+3. Root cause: Check for malformed JSX expressions, stray escape characters, unbalanced braces, or missing library exports.
+4. Smallest safe repair: Use edit_file to apply a targeted fix (repair attempt ${gateResult?.attempt ?? 1} of ${ValidationGate.MAX_REPAIR_ATTEMPTS}).`;
+
+      throw new ToolExecutionError(
+        "invalid_input",
+        `Validation failed for ${requested}:\n${formattedErrors}${repairGuidance}`,
+        {
+          path: requested,
+          writeSucceeded: true,
+          readBackSucceeded: true,
+          syntaxValid: false,
+          failureCategory: integrityResult.failureCategory,
+          diagnostics: allDiagnostics,
+          repairAttempt: gateResult?.attempt,
+          isBlocked: gateResult?.isBlocked,
+        },
+      );
+    }
+
+    context?.validationGate?.recordValidationPass(requested, readBackHash);
+
+    SourceTracingManager.getInstance().record({
+      sessionId,
+      tool: "write_file",
+      boundary: "VALIDATION_RESULT",
+      file: requested,
+      validationStatus: "verified",
+    });
+
+    return {
+      path: requested,
+      written: true,
+      bytes: Buffer.byteLength(content, "utf8"),
+      writeSucceeded: true,
+      readBackSucceeded: true,
+      syntaxValid: true,
+      diagnostics: allDiagnostics,
+    };
   }
 
-  private async editFile(workspacePath: string, requested: string, oldString: string, newString: string): Promise<unknown> {
+  private async editFile(
+    workspacePath: string,
+    requested: string,
+    oldString: string,
+    newString: string,
+    context?: RuntimeToolExecutorContext,
+  ): Promise<unknown> {
     const target = await resolveWorkspacePathSafe(workspacePath, requested);
     const content = await fs.readFile(target, "utf8");
-    if (!content.includes(oldString)) {
+
+    const matchIndex = content.indexOf(oldString);
+    if (matchIndex === -1) {
       throw new ToolExecutionError("invalid_input", `old_string was not found in ${requested}`);
     }
-    await fs.writeFile(target, content.replace(oldString, newString), "utf8");
-    return { path: requested, edited: true };
+
+    // Deterministic string slice replacement (prevents JavaScript replace() $$, $&, $', $` substitution bugs)
+    const newContent = content.slice(0, matchIndex) + newString + content.slice(matchIndex + oldString.length);
+    const sessionId = context?.session.sessionId ?? "unknown";
+
+    SourceTracingManager.getInstance().record({
+      sessionId,
+      tool: "edit_file",
+      boundary: "FILE_WRITE_REQUEST",
+      file: requested,
+      contentHash: SourceTracingManager.getInstance().computeHash(newContent),
+      contentLength: newContent.length,
+    });
+
+    context?.validationGate?.recordFileEdit(requested);
+
+    await fs.writeFile(target, newContent, "utf8");
+
+    const readBack = await fs.readFile(target, "utf8");
+    const readBackHash = SourceTracingManager.getInstance().computeHash(readBack);
+
+    SourceTracingManager.getInstance().record({
+      sessionId,
+      tool: "edit_file",
+      boundary: "FILE_WRITE_COMPLETED",
+      file: requested,
+      contentHash: readBackHash,
+      contentLength: readBack.length,
+    });
+
+    if (readBack !== newContent) {
+      throw new ToolExecutionError(
+        "internal_error",
+        `Filesystem read-back mismatch: bytes read back from ${requested} do not match the expected edited content.`,
+      );
+    }
+
+    const integrityResult = validateSourceIntegrity(target, readBack);
+    const dependencyResult = await validateDependencies(workspacePath, target, readBack);
+    const allDiagnostics: SourceValidationDiagnostic[] = [
+      ...integrityResult.diagnostics,
+      ...dependencyResult.diagnostics,
+    ];
+
+    const hasErrors = allDiagnostics.some((d) => d.severity === "error");
+    if (hasErrors) {
+      const gateResult = context?.validationGate?.recordValidationFailure(
+        requested,
+        allDiagnostics,
+        readBackHash,
+      );
+
+      SourceTracingManager.getInstance().record({
+        sessionId,
+        tool: "edit_file",
+        boundary: "VALIDATION_RESULT",
+        file: requested,
+        validationStatus: "failed",
+        errorCategory: integrityResult.failureCategory ?? "dependency_error",
+        metadata: { diagnostics: allDiagnostics.map((d) => d.message) },
+      });
+
+      const formattedErrors = allDiagnostics
+        .filter((d) => d.severity === "error")
+        .map((d) => `Line ${d.line ?? "?"}, Col ${d.character ?? "?"}: ${d.message}${d.snippet ? `\n  > ${d.snippet}` : ""}`)
+        .join("\n");
+
+      const repairGuidance = gateResult?.isBlocked
+        ? `\nValidation gate is BLOCKED: maximum repair attempts (${ValidationGate.MAX_REPAIR_ATTEMPTS}) exceeded.`
+        : `\n\nSelf-Correction Guidance:
+1. What failed: Deterministic syntax/import validation failed after edit in ${requested}.
+2. Exact diagnostic:
+${formattedErrors}
+3. Root cause: Check if new_string introduced broken JSX, accidental tokens, or invalid imports.
+4. Smallest safe repair: Use edit_file to correct the defect (repair attempt ${gateResult?.attempt ?? 1} of ${ValidationGate.MAX_REPAIR_ATTEMPTS}).`;
+
+      throw new ToolExecutionError(
+        "invalid_input",
+        `Validation failed for ${requested}:\n${formattedErrors}${repairGuidance}`,
+        {
+          path: requested,
+          writeSucceeded: true,
+          readBackSucceeded: true,
+          syntaxValid: false,
+          failureCategory: integrityResult.failureCategory,
+          diagnostics: allDiagnostics,
+          repairAttempt: gateResult?.attempt,
+          isBlocked: gateResult?.isBlocked,
+        },
+      );
+    }
+
+    context?.validationGate?.recordValidationPass(requested, readBackHash);
+
+    SourceTracingManager.getInstance().record({
+      sessionId,
+      tool: "edit_file",
+      boundary: "VALIDATION_RESULT",
+      file: requested,
+      validationStatus: "verified",
+    });
+
+    return {
+      path: requested,
+      edited: true,
+      writeSucceeded: true,
+      readBackSucceeded: true,
+      syntaxValid: true,
+      diagnostics: allDiagnostics,
+    };
   }
 
   private async createDirectory(workspacePath: string, requested: string): Promise<unknown> {

@@ -23,6 +23,7 @@ import {
   type SubagentRunner,
 } from "./tools/subagent";
 import type { DiffViewService } from "./review/diffView";
+import { ValidationGate } from "./validation/validationGate";
 import type { RuntimeUsage } from "./runtimeTypes";
 import {
   AgentRuntime,
@@ -45,6 +46,14 @@ import { UserQuestionBroker } from "./userInteraction/userQuestionBroker";
 import { TaskPlanStore } from "./state/taskPlan";
 import { compactChatTurns } from "./tools/contextManager";
 import { restoreChatTurns } from "./tools/contextRestore";
+import {
+  ModelProviderFactory,
+  resolveRuntimeModelConfig,
+  assertProviderRuntimeMatch,
+  logModelResolution,
+  ProviderUnavailableError,
+  ProviderConfigurationMismatchError,
+} from "./provider/modelProvider";
 
 export interface RuntimeManagerOptions {
   readonly sessionStore: SessionStore;
@@ -157,6 +166,7 @@ function resultSize(result: unknown): number {
 
 export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   private readonly runtimes = new Map<AgentRuntime["provider"], AgentRuntime>();
+  private readonly providerFactory = new ModelProviderFactory();
   private readonly sessions = new Map<string, CodeviaSession>();
   private readonly activeRuns = new Map<string, ActiveRun>();
   private readonly emitter = new vscode.EventEmitter<RuntimeEvent>();
@@ -171,6 +181,8 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   private readonly reviewManager = new FileChangeReviewManager();
   /** Per-session checkpoint timeline over recorded file changes (A2). */
   private readonly checkpoints = new CheckpointManager();
+  /** Authoritative validation gate enforcing deterministic verification per session. */
+  private readonly validationGates = new Map<string, ValidationGate>();
   /**
    * Subagent orchestration state (A7). `subagentDepth` enforces depth 1: while a
    * subagent is running, a nested dispatch is refused rather than recursing.
@@ -214,6 +226,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     this.backgroundProcesses = options.backgroundProcesses ?? new BackgroundProcessManager();
     for (const runtime of options.runtimes) {
       this.runtimes.set(runtime.provider, runtime);
+      this.providerFactory.registerRuntime(runtime);
     }
     // Bridge question lifecycle onto the runtime event bus the webview watches.
     this.userQuestions.onEvent((event) => {
@@ -237,7 +250,19 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
 
   /** Resolves a pending `ask_user` question. Returns false for a stale id. */
   resolveUserQuestion(requestId: string, answer: string): boolean {
-    return this.userQuestions.answer(requestId, answer);
+    const answered = this.userQuestions.answer(requestId, answer);
+    if (answered && this.activeSessionId) {
+      const plan = this.taskPlans.get(this.activeSessionId);
+      if (plan && plan.currentTaskId) {
+        const current = plan.items.find((t) => t.id === plan.currentTaskId);
+        if (current && current.status === "blocked") {
+          const updated = this.taskPlans.startTask(this.activeSessionId, plan.currentTaskId);
+          void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
+          this.publishEvent({ type: "todo_updated", sessionId: this.activeSessionId, plan: updated, timestamp: Date.now() });
+        }
+      }
+    }
+    return answered;
   }
 
   /** Dismisses a pending `ask_user` question. Returns false for a stale id. */
@@ -340,7 +365,13 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     }
 
     const parent = context.session;
-    const runtime = this.getRequiredRuntime(parent.provider);
+    const resolvedConfig = resolveRuntimeModelConfig({
+      activeConfig: this.getProviderConfig(),
+      sessionConfig: { provider: parent.provider, modelId: parent.modelId },
+      persistedConfig: this.options.providerConfigStore?.load(),
+    });
+    const runtime = this.providerFactory.createModelClient(resolvedConfig);
+    assertProviderRuntimeMatch(resolvedConfig, runtime, parent.modelId);
     const subagentSessionId = `subagent-${crypto.randomUUID()}`;
     const controller = new AbortController();
     let timedOut = false;
@@ -369,7 +400,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
         {
           sessionId: subagentSessionId,
           workspacePath: parent.workspacePath,
-          modelId: parent.modelId ?? this.getModelId(parent.provider),
+          modelId: resolvedConfig.modelId ?? parent.modelId ?? this.getModelId(resolvedConfig.provider),
           prompt: input.task,
           // Read-only tool set: derived from the registry, excludes writes,
           // terminal, ask_user/update_todo and run_subagent.
@@ -520,6 +551,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
 
   registerRuntime(runtime: AgentRuntime): void {
     this.runtimes.set(runtime.provider, runtime);
+    this.providerFactory.registerRuntime(runtime);
     if (!this.activeProvider) {
       this.activeProvider = runtime.provider;
     }
@@ -529,23 +561,35 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     for (const sessionId of Array.from(this.activeRuns.keys())) {
       await this.cancelTask(sessionId);
     }
-    const runtime = this.getRequiredRuntime(config.provider);
+    const resolvedConfig = resolveRuntimeModelConfig({ activeConfig: config });
+    const runtime = this.providerFactory.createModelClient(resolvedConfig);
     await runtime.configure(config);
     this.activeProvider = config.provider;
     this.activeConfig = config;
     // Deterministic and identical to what the store derives, so the credential
     // slot can be resolved without waiting for persistence.
     this.activeProfileId = profileIdFor(config.provider, "baseUrl" in config ? config.baseUrl : undefined);
+    this.providerFactory.invalidateClient(config.provider);
     // Remember the selection (never secrets) so the next start restores it.
     void this.options.providerConfigStore?.save(config).catch(() => {
       // Persistence is best-effort; the runtime is already usable.
     });
-    if (this.activeSessionId && "modelId" in config) {
-      this.updateSession(this.activeSessionId, { modelId: config.modelId, status: "IDLE", currentTask: undefined });
+    // Authoritatively synchronize ALL sessions to the newly selected provider & model:
+    const newModelId = "modelId" in config ? config.modelId : undefined;
+    for (const session of this.sessions.values()) {
+      this.updateSession(session.sessionId, {
+        provider: config.provider,
+        ...(newModelId ? { modelId: newModelId } : {}),
+        providerSessionId: undefined,
+        agentId: undefined,
+        status: "IDLE",
+        currentTask: undefined,
+      });
     }
     this.options.logger?.info("Runtime provider selected", {
       operation: "setProvider",
       sessionId: this.activeSessionId,
+      outcome: `provider=${config.provider}`,
     });
     this.publishEvent({
       type: "status",
@@ -631,7 +675,11 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   }
 
   createSession(workspacePath = this.options.defaultWorkspacePath ?? "."): CodeviaSession {
-    const provider = this.activeProvider ?? this.runtimes.keys().next().value;
+    const resolvedConfig = resolveRuntimeModelConfig({
+      activeConfig: this.getProviderConfig(),
+      persistedConfig: this.options.providerConfigStore?.load(),
+    });
+    const provider = resolvedConfig.provider;
     if (!provider) {
       throw new RuntimeError("invalid_configuration", "No runtime provider is configured.");
     }
@@ -640,7 +688,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     this.resetConversationScopedAutoApprove();
 
     const now = new Date();
-    const modelId = this.activeConfig && "modelId" in this.activeConfig ? this.activeConfig.modelId : undefined;
+    const modelId = resolvedConfig.modelId;
     const session: CodeviaSession = {
       sessionId: crypto.randomUUID(),
       provider,
@@ -657,6 +705,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     this.options.logger?.info("Spider session created", {
       operation: "createSession",
       sessionId: session.sessionId,
+      outcome: `provider=${provider}, model=${modelId ?? "none"}`,
     });
     return session;
   }
@@ -703,6 +752,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     this.options.permissionManager.cancelSessionRequests(sessionId);
     this.userQuestions.cancelSession(sessionId);
     this.taskPlans.clear(sessionId);
+    void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
     this.restoredHistories.delete(sessionId);
     this.checkpoints.clearSession(sessionId);
     try {
@@ -767,16 +817,31 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     const now = Date.now();
     this.sessions.clear();
     this.activeSessionId = undefined;
+    const loadedPlans = this.options.sessionStore.loadTaskPlans?.() ?? {};
+    this.taskPlans.restore(loadedPlans);
+
+    const resolvedConfig = resolveRuntimeModelConfig({
+      activeConfig: this.getProviderConfig(),
+      persistedConfig: this.options.providerConfigStore?.load(),
+    });
 
     for (const session of loaded) {
       if (session.provider === "cursor") {
         continue;
       }
+      // Authoritative runtime configuration takes precedence over stale session metadata
+      const hasExplicitConfig = Boolean(this.activeProvider || this.options.providerConfigStore?.load()?.provider);
+      const effectiveProvider = hasExplicitConfig ? resolvedConfig.provider : session.provider;
+      const effectiveModelId = hasExplicitConfig ? resolvedConfig.modelId : session.modelId;
+
       const restored: CodeviaSession = {
         ...session,
+        provider: effectiveProvider,
+        ...(effectiveModelId ? { modelId: effectiveModelId } : {}),
         status: this.isNonTerminal(session.status) ? "DISCONNECTED" : session.status,
         updatedAt: this.isNonTerminal(session.status) ? new Date(now) : session.updatedAt,
         ...(this.isNonTerminal(session.status) ? { runId: undefined } : {}),
+        ...(effectiveProvider !== session.provider ? { providerSessionId: undefined, agentId: undefined } : {}),
       };
       this.sessions.set(restored.sessionId, restored);
     }
@@ -831,7 +896,46 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     // shipped path always runs with the full registered tool set so the model
     // can autonomously pick any tool (write_file, edit_file, run_command…).
     const mode: AgentMode = DEFAULT_AGENT_MODE;
-    const runtime = this.getRequiredRuntime(session.provider);
+
+    // Single authoritative configuration resolver
+    const resolvedConfig = resolveRuntimeModelConfig({
+      activeConfig: this.getProviderConfig(),
+      sessionConfig: { provider: session.provider, modelId: session.modelId },
+      persistedConfig: this.options.providerConfigStore?.load(),
+    });
+
+    // Validate provider configuration (e.g. OpenRouter requires API key)
+    const validation = await this.providerFactory.validateConfiguration(resolvedConfig);
+    if (!validation.valid) {
+      throw new ProviderUnavailableError(
+        resolvedConfig.provider,
+        resolvedConfig.modelId,
+        validation.error ?? `Provider "${resolvedConfig.provider}" configuration is invalid.`
+      );
+    }
+
+    // Synchronize session provider & model to authoritative configuration
+    if (session.provider !== resolvedConfig.provider || session.modelId !== resolvedConfig.modelId) {
+      this.updateSession(sessionId, {
+        provider: resolvedConfig.provider,
+        modelId: resolvedConfig.modelId,
+        ...(session.provider !== resolvedConfig.provider ? { providerSessionId: undefined, agentId: undefined } : {}),
+      });
+    }
+
+    const runtime = this.providerFactory.createModelClient(resolvedConfig);
+
+    // Invariant check: runtime provider MUST match resolved configuration
+    assertProviderRuntimeMatch(resolvedConfig, runtime, session.modelId);
+
+    // Observability: structured model resolution log
+    logModelResolution(this.options.logger, resolvedConfig, runtime, {
+      runId: session.runId,
+      sessionId,
+      requestedProvider: session.provider,
+      requestedModel: session.modelId,
+    });
+
     const controller = new AbortController();
     const cancellationSubscription = cancellationToken?.onCancellationRequested(() => {
       controller.abort();
@@ -867,12 +971,13 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
       } catch {
         rulesContext = undefined;
       }
+      const effectiveModelId = resolvedConfig.modelId ?? session.modelId ?? this.getModelId(resolvedConfig.provider);
       await runtime.sendMessage(
         {
           sessionId,
           providerSessionId,
           workspacePath: session.workspacePath,
-          modelId: session.modelId ?? this.getModelId(session.provider),
+          modelId: effectiveModelId,
           prompt,
           retry,
           mode,
@@ -899,11 +1004,23 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
         const currentSession = this.sessions.get(sessionId);
         if (currentSession && !["COMPLETED", "CANCELLED", "FAILED", "DISCONNECTED"].includes(currentSession.status)) {
           this.updateSession(sessionId, { status: "COMPLETED", currentTask: undefined });
+          const plan = this.taskPlans.get(sessionId);
+          if (plan && plan.currentTaskId) {
+            const updated = this.taskPlans.completeTask(sessionId, plan.currentTaskId);
+            void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
+            this.publishEvent({ type: "todo_updated", sessionId, plan: updated, timestamp: Date.now() });
+          }
           this.publishEvent({ type: "completed", sessionId, timestamp: Date.now() });
         }
       }
     } catch (error) {
       const runtimeError = this.toRuntimeError(error, "run");
+      const plan = this.taskPlans.get(sessionId);
+      if (plan && plan.currentTaskId) {
+        const updated = this.taskPlans.failTask(sessionId, plan.currentTaskId, runtimeError.message);
+        void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
+        this.publishEvent({ type: "todo_updated", sessionId, plan: updated, timestamp: Date.now() });
+      }
       if (runtimeError.code === "cancelled") {
         const currentSession = this.sessions.get(sessionId);
         if (currentSession && currentSession.status !== "CANCELLED") {
@@ -1080,6 +1197,15 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     }
   }
 
+  getValidationGate(sessionId: string): ValidationGate {
+    let gate = this.validationGates.get(sessionId);
+    if (!gate) {
+      gate = new ValidationGate();
+      this.validationGates.set(sessionId, gate);
+    }
+    return gate;
+  }
+
   private async handleToolCall(
     sessionId: string,
     call: RuntimeToolCall,
@@ -1105,14 +1231,24 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
         : {}),
       // Human-in-the-loop + agent state gateways: the tools stay thin and the
       // runtime stays the single owner of pending questions and task plans.
-      askUser: (request) => this.userQuestions.ask({ ...request, sessionId }),
+      askUser: (request) => {
+        const plan = this.taskPlans.get(sessionId);
+        if (plan && plan.currentTaskId) {
+          const updated = this.taskPlans.blockTask(sessionId, plan.currentTaskId, request.question);
+          void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
+          this.publishEvent({ type: "todo_updated", sessionId, plan: updated, timestamp: Date.now() });
+        }
+        return this.userQuestions.ask({ ...request, sessionId });
+      },
       taskPlan: {
         update: (items) => {
           const plan = this.taskPlans.update(sessionId, items);
+          void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
           this.publishEvent({ type: "todo_updated", sessionId, plan, timestamp: Date.now() });
           return plan;
         },
       },
+      validationGate: this.getValidationGate(sessionId),
     };
     const startedAt = Date.now();
     const response = await this.toolRouter.route(
@@ -1395,15 +1531,15 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   }
 
   private getCurrentRuntime(): AgentRuntime {
-    const provider = this.activeProvider ?? this.runtimes.keys().next().value;
-    if (!provider) {
-      throw new RuntimeError("invalid_configuration", "No runtime provider is configured.");
-    }
-    return this.getRequiredRuntime(provider);
+    const resolvedConfig = resolveRuntimeModelConfig({
+      activeConfig: this.getProviderConfig(),
+      persistedConfig: this.options.providerConfigStore?.load(),
+    });
+    return this.providerFactory.createModelClient(resolvedConfig);
   }
 
   private getRequiredRuntime(provider: RuntimeProviderConfig["provider"]): AgentRuntime {
-    const runtime = this.runtimes.get(provider);
+    const runtime = this.providerFactory.getRuntime(provider) ?? this.runtimes.get(provider);
     if (!runtime) {
       throw new RuntimeError("invalid_configuration", `Runtime provider is not registered: ${provider}`);
     }
@@ -1420,6 +1556,12 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   private toRuntimeError(error: unknown, operation: string): RuntimeError {
     if (error instanceof RuntimeError) {
       return error;
+    }
+    if (error instanceof ProviderUnavailableError) {
+      return new RuntimeError("provider_unavailable", error.message, { cause: error });
+    }
+    if (error instanceof ProviderConfigurationMismatchError) {
+      return new RuntimeError("invalid_configuration", error.message, { cause: error });
     }
     const message = error instanceof Error ? error.message : String(error);
     const normalized = message.toLowerCase();

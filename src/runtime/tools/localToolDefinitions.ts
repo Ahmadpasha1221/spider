@@ -18,7 +18,13 @@ If the user asks which model is running, answer with the selected model named be
 
 Paths in tool arguments are relative to the workspace root, such as simple.py or src/main.py. If the user gives an absolute path inside the workspace, convert it to a workspace-relative path before calling a tool. Never use paths that leave the workspace.
 Never tell the user a file was created, changed, or a command succeeded unless the tool result says success.
-Call finish only after the required operations have succeeded.`;
+Call finish only after the required operations have succeeded.
+
+When managing tasks with update_todo:
+- Keep the plan strictly proportional to the user's request. Simple requests need only 1-3 tasks (or direct execution without a plan); medium tasks need 3-7 tasks strictly bounded to what the user requested.
+- Never invent speculative features (such as PWA manifests, sound effects, confetti, SEO, or unrequested polish) unless explicitly asked.
+- Exactly one task may be in_progress at any time.
+- Transition tasks to completed only when the relevant implementation action or validation has genuinely succeeded.`;
 
 export function buildAgentSystemPrompt(
   modelId?: string,

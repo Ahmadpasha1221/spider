@@ -20,6 +20,7 @@ import {
   GuiRuntimeProvider,
   LocalProvider,
   ModelOption,
+  TodoItemView,
   WebviewMessage,
 } from "./types";
 
@@ -122,13 +123,11 @@ export class MessageRouter {
       }
       case "SELECT_SESSION": {
         if (this.usesManagedRuntime() && this.runtimeManager) {
-          const selected = this.runtimeManager.selectSession(typed.sessionId);
+          this.runtimeManager.selectSession(typed.sessionId);
           // A conversation switch also re-syncs its task plan (host-authoritative).
           const plan = this.runtimeManager.getTaskPlan(typed.sessionId);
-          if (plan) {
-            return { type: "TODO_UPDATED", sessionId: plan.sessionId, items: plan.items.map(toTodoItemView) } as ExtensionMessage;
-          }
-          return { success: true, selected };
+          const items = plan ? plan.items.map(toTodoItemView) : [];
+          return { type: "TODO_UPDATED", sessionId: typed.sessionId, items } as ExtensionMessage;
         }
         const selected = this.agentManager.selectSession(typed.sessionId);
         return { success: true, selected };
@@ -750,6 +749,16 @@ export class MessageRouter {
           throw new Error("Invalid GET_TRANSCRIPT message");
         }
         return message as WebviewMessage;
+      case "GET_CHECKPOINTS":
+        if (typeof typed.sessionId !== "string") {
+          throw new Error("Invalid GET_CHECKPOINTS message");
+        }
+        return message as WebviewMessage;
+      case "RESTORE_CHECKPOINT":
+        if (typeof typed.checkpointId !== "string") {
+          throw new Error("Invalid RESTORE_CHECKPOINT message");
+        }
+        return message as WebviewMessage;
       case "NEW_SESSION":
         if (typed.workspacePath !== undefined && typeof typed.workspacePath !== "string") {
           throw new Error("Invalid NEW_SESSION message");
@@ -797,6 +806,11 @@ export class MessageRouter {
           throw new Error("Invalid DELETE_MESSAGE message");
         }
         return message as WebviewMessage;
+      case "DELETE_SESSION":
+        if (typeof typed.sessionId !== "string") {
+          throw new Error("Invalid DELETE_SESSION message");
+        }
+        return message as WebviewMessage;
       case "ANSWER_USER_QUESTION":
         if (typeof typed.requestId !== "string" || typeof typed.answer !== "string") {
           throw new Error("Invalid ANSWER_USER_QUESTION message");
@@ -816,6 +830,7 @@ export class MessageRouter {
         return message as WebviewMessage;
       case "GET_EXTENSION_INFO":
       case "OPEN_AGENT_EDITOR":
+      case "OPEN_HISTORY":
         return message as WebviewMessage;
       case "CONNECT_CURSOR":
         if (typed.apiKey !== undefined && typeof typed.apiKey !== "string") {
@@ -916,12 +931,26 @@ function toLocalModel(model: RuntimeModel): { id: string; name: string; provider
   };
 }
 
-function toTodoItemView(item: { id: string; title: string; status: string }): {
+function toTodoItemView(item: {
   id: string;
   title: string;
-  status: "pending" | "in_progress" | "completed" | "cancelled";
-} {
-  return { id: item.id, title: item.title, status: item.status as "pending" | "in_progress" | "completed" | "cancelled" };
+  status: string;
+  order?: number;
+  startedAt?: number;
+  completedAt?: number;
+  error?: string;
+  blockedReason?: string;
+}): TodoItemView {
+  return {
+    id: item.id,
+    title: item.title,
+    status: item.status as TodoItemView["status"],
+    ...(typeof item.order === "number" ? { order: item.order } : {}),
+    ...(typeof item.startedAt === "number" ? { startedAt: item.startedAt } : {}),
+    ...(typeof item.completedAt === "number" ? { completedAt: item.completedAt } : {}),
+    ...(item.error ? { error: item.error } : {}),
+    ...(item.blockedReason ? { blockedReason: item.blockedReason } : {}),
+  };
 }
 
 function toFileChangeView(change: FileChangeSummary): FileChangeView {

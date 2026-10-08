@@ -65,7 +65,10 @@ function statusGlyph(status: TodoItemView["status"]): string {
     case "in_progress":
       return "◐";
     case "cancelled":
+    case "failed":
       return "✕";
+    case "blocked":
+      return "!";
     default:
       return "○";
   }

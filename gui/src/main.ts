@@ -1,9 +1,10 @@
 import { onHostMessage, postToHost } from "./bridge";
-import type { HostToGui, RuntimeProvider, SessionListItem, PermissionRule, PermissionRuleCategory } from "./protocol";
+import type { HostToGui, RuntimeProvider, SessionListItem, PermissionRule, PermissionRuleCategory, TodoItemView } from "./protocol";
 import { AppState, ChatLine, createInitialState, phaseFromAgentState, type SettingsSection } from "./state";
 import { createComposer } from "./components/composer";
 import { createMessageList } from "./components/messageList";
-import { createQuestionPrompt, createTodoPanel } from "./components/agentPanels";
+import { createQuestionPrompt } from "./components/agentPanels";
+import { createTaskPlanHeader, type TaskPlanHeaderHandle } from "./components/taskPlanHeader";
 import { renderChatView } from "./views/chatView";
 import { renderSettingsView } from "./views/settingsView";
 
@@ -70,7 +71,12 @@ const composer = createComposer(composerRoot, {
 
 // Phase 3 surfaces: a task-plan panel and an ask_user prompt. Both mirror
 // host-authoritative state; the components own their own DOM.
-const todoPanel = createTodoPanel();
+const taskPlanRoot = document.getElementById("task-plan-root") ?? document.body;
+const taskPlanHeader: TaskPlanHeaderHandle = createTaskPlanHeader(taskPlanRoot);
+const todoPanel = {
+  update: (items: readonly TodoItemView[], title?: string) => taskPlanHeader.update(items, title),
+  clear: () => taskPlanHeader.clear(),
+};
 const questionPrompt = createQuestionPrompt({
   onAnswer: (requestId, answer) => {
     state.pendingQuestion = undefined;
@@ -488,8 +494,10 @@ function applySessionUpdate(sessions: SessionListItem[], activeSessionId?: strin
     return;
   }
   if (state.activeSessionId !== hostActive) {
-    // Conversation changed: the previous timeline no longer applies.
+    // Conversation changed: the previous timeline and tasks no longer apply.
     state.checkpoints = [];
+    state.todoItems = [];
+    taskPlanHeader.clear();
   }
   state.activeSessionId = hostActive;
   if (state.activeSessionId && loadedTranscriptSessionId !== state.activeSessionId) {

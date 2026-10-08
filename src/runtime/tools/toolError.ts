@@ -40,15 +40,18 @@ export type ToolErrorCode =
 export interface ToolErrorInfo {
   readonly code: ToolErrorCode;
   readonly message: string;
+  readonly details?: Record<string, unknown>;
 }
 
 export class ToolExecutionError extends Error {
   readonly code: ToolErrorCode;
+  readonly details?: Record<string, unknown>;
 
-  constructor(code: ToolErrorCode, message: string) {
+  constructor(code: ToolErrorCode, message: string, details?: Record<string, unknown>) {
     super(message);
     this.name = "ToolExecutionError";
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -72,7 +75,11 @@ export function isAbortError(value: unknown): boolean {
  */
 export function toToolErrorInfo(error: unknown): ToolErrorInfo {
   if (isToolExecutionError(error)) {
-    return { code: error.code, message: error.message };
+    return {
+      code: error.code,
+      message: error.message,
+      ...(error.details ? { details: error.details } : {}),
+    };
   }
   if (isAbortError(error)) {
     return { code: "cancelled", message: "Tool execution was cancelled." };

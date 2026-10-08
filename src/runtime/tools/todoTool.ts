@@ -1,12 +1,12 @@
 import { ToolExecutionError } from "./toolError";
 import {
-  isTodoStatus,
+  isTaskStatus,
   MAX_TODO_ID_LENGTH,
   MAX_TODO_ITEMS,
   MAX_TODO_TITLE_LENGTH,
+  type AgentTask,
   type TaskPlan,
-  type TodoItem,
-  type TodoStatus,
+  type TaskStatus,
 } from "../state/taskPlan";
 
 /**
@@ -19,14 +19,15 @@ import {
  */
 export interface UpdateTodoResult {
   readonly sessionId: string;
-  readonly items: readonly TodoItem[];
+  readonly items: readonly AgentTask[];
   readonly updatedAt: number;
-  readonly counts: Readonly<Record<TodoStatus, number>>;
+  readonly counts: Readonly<Record<TaskStatus, number>>;
   readonly inProgressId?: string;
+  readonly currentTaskId?: string;
 }
 
 export interface UpdateTodoDeps {
-  readonly taskPlan?: { update(items: readonly TodoItem[]): TaskPlan };
+  readonly taskPlan?: { update(items: readonly AgentTask[]): TaskPlan };
 }
 
 export async function updateTodo(input: Record<string, unknown>, deps: UpdateTodoDeps): Promise<UpdateTodoResult> {
@@ -37,17 +38,18 @@ export async function updateTodo(input: Record<string, unknown>, deps: UpdateTod
 
   const items = parseTodoItems(input.items);
   const plan = sink.update(items);
-  const inProgress = items.find((item) => item.status === "in_progress");
+  const inProgress = plan.items.find((item) => item.status === "in_progress");
   return {
     sessionId: plan.sessionId,
     items: plan.items,
     updatedAt: plan.updatedAt,
     counts: countStatuses(plan.items),
     ...(inProgress ? { inProgressId: inProgress.id } : {}),
+    ...(plan.currentTaskId ? { currentTaskId: plan.currentTaskId } : {}),
   };
 }
 
-export function parseTodoItems(value: unknown): TodoItem[] {
+export function parseTodoItems(value: unknown): AgentTask[] {
   if (!Array.isArray(value)) {
     throw new ToolExecutionError("invalid_input", "items must be an array of todo items.");
   }
@@ -56,10 +58,11 @@ export function parseTodoItems(value: unknown): TodoItem[] {
   }
 
   const seen = new Set<string>();
-  const items: TodoItem[] = [];
+  const items: AgentTask[] = [];
   let inProgress = 0;
 
-  for (const entry of value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const entry = value[index];
     if (typeof entry !== "object" || entry === null) {
       throw new ToolExecutionError("invalid_input", "Every todo item must be an object.");
     }
@@ -86,17 +89,28 @@ export function parseTodoItems(value: unknown): TodoItem[] {
     }
 
     const status = record.status;
-    if (!isTodoStatus(status)) {
+    if (!isTaskStatus(status)) {
       throw new ToolExecutionError(
         "invalid_input",
-        `Invalid todo status for "${id}". Use pending, in_progress, completed or cancelled.`,
+        `Invalid todo status for "${id}". Use pending, in_progress, completed, failed, blocked, or cancelled.`,
       );
     }
     if (status === "in_progress") {
       inProgress += 1;
     }
 
-    items.push({ id, title, status });
+    const order = typeof record.order === "number" ? record.order : index + 1;
+    const error = typeof record.error === "string" ? record.error : undefined;
+    const blockedReason = typeof record.blockedReason === "string" ? record.blockedReason : undefined;
+
+    items.push({
+      id,
+      title,
+      status,
+      order,
+      ...(error ? { error } : {}),
+      ...(blockedReason ? { blockedReason } : {}),
+    });
   }
 
   if (inProgress > 1) {
@@ -105,10 +119,29 @@ export function parseTodoItems(value: unknown): TodoItem[] {
   return items;
 }
 
-function countStatuses(items: readonly TodoItem[]): Record<TodoStatus, number> {
-  const counts: Record<TodoStatus, number> = { pending: 0, in_progress: 0, completed: 0, cancelled: 0 };
+function countStatuses(items: readonly AgentTask[]): Record<TaskStatus, number> {
+  const counts: Record<string, number> = {
+    pending: 0,
+    in_progress: 0,
+    completed: 0,
+    cancelled: 0,
+  };
+  let hasFailed = false;
+  let hasBlocked = false;
   for (const item of items) {
-    counts[item.status] += 1;
+    if (item.status === "failed") {
+      hasFailed = true;
+    }
+    if (item.status === "blocked") {
+      hasBlocked = true;
+    }
+    counts[item.status] = (counts[item.status] ?? 0) + 1;
   }
-  return counts;
+  if (hasFailed) {
+    counts.failed = counts.failed ?? 0;
+  }
+  if (hasBlocked) {
+    counts.blocked = counts.blocked ?? 0;
+  }
+  return counts as Record<TaskStatus, number>;
 }
