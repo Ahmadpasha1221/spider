@@ -6,6 +6,7 @@ import type {
   UserQuestionRequestInput,
   UserQuestion,
 } from "./userInteraction/userQuestionBroker";
+import type { ValidationGate } from "./validation/validationGate";
 
 export type RuntimeProvider = "cursor" | "ollama" | "openai-compatible" | "openrouter" | "mock";
 
@@ -349,6 +350,8 @@ export interface RuntimeToolExecutorContext {
   readonly askUser?: (request: UserQuestionRequestInput) => Promise<UserQuestionAnswer>;
   /** Authoritative task-plan writer for `update_todo`. */
   readonly taskPlan?: { update(items: readonly TodoItem[]): TaskPlan };
+  /** Authoritative validation gate enforcing code integrity before completion. */
+  readonly validationGate?: ValidationGate;
 }
 
 export interface RuntimeToolExecutor {

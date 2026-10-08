@@ -16,6 +16,7 @@ import {
   type CompactionInfo,
   type ContextBudget,
 } from "./contextManager";
+import { SourceTracingManager } from "../validation/sourceTracing";
 
 export interface ChatToolCall {
   id: string;
@@ -144,6 +145,14 @@ export async function runInferenceAgentLoop(
   for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration += 1) {
     throwIfAborted(request.signal);
     const completion = await completeChat(modelView(), request.signal);
+    SourceTracingManager.getInstance().record({
+      sessionId: request.sessionId,
+      iteration,
+      model: request.modelId,
+      boundary: "MODEL_OUTPUT_RAW",
+      contentHash: SourceTracingManager.getInstance().computeHash(completion.content),
+      contentLength: completion.content.length,
+    });
     if (completion.usage) {
       onUsage(completion.usage);
     }
@@ -204,6 +213,14 @@ export async function runInferenceAgentLoop(
 
     for (const call of calls) {
       throwIfAborted(request.signal);
+      SourceTracingManager.getInstance().record({
+        sessionId: request.sessionId,
+        iteration,
+        tool: call.name,
+        toolCallId: call.id,
+        boundary: "TOOL_CALL_PARSED",
+        contentHash: SourceTracingManager.getInstance().computeHash(safeJsonArguments(call.input)),
+      });
       await emit({ type: "tool_call", sessionId: request.sessionId, toolCall: call, timestamp: Date.now() });
       await emit({ type: "tool_running", sessionId: request.sessionId, toolCall: call, timestamp: Date.now() });
       await emitThinking(describeToolStart(call));
@@ -238,6 +255,14 @@ export async function runInferenceAgentLoop(
         tool_call_id: toolCallId,
         content: JSON.stringify(response.result ?? { success: false, tool: call.name, error: response.error ?? "Tool failed." }),
       });
+
+      // If validation gate marked execution as blocked (max repairs exceeded), halt with honest diagnostics
+      if (isRecord(response.result) && (response.result.isGateBlocked === true || response.result.isBlocked === true)) {
+        const message = `Task halted: Validation gate is BLOCKED. ${response.error ?? "Code validation failed and exceeded maximum repair attempts."}`;
+        history.push({ role: "assistant", content: message });
+        await emit({ type: "assistant_message", sessionId: request.sessionId, message, timestamp: Date.now() });
+        return;
+      }
 
       // Terminal: after a successful finish there are no more model calls,
       // tools, or Thinking events. COMPLETED is final for this run.

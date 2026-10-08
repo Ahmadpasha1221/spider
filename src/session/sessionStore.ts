@@ -5,6 +5,7 @@ import { STORAGE_KEYS, readState } from "../shared/storageKeys";
 
 const SESSIONS_STORAGE_KEY = STORAGE_KEYS.sessions.current;
 const ACTIVE_SESSION_STORAGE_KEY = STORAGE_KEYS.activeSession.current;
+const TASK_PLANS_STORAGE_KEY = STORAGE_KEYS.taskPlans.current;
 
 const AGENT_STATUSES: readonly AgentStatus[] = [
   "IDLE",
@@ -22,6 +23,7 @@ const RUNTIME_PROVIDERS: readonly RuntimeProvider[] = [
   "cursor",
   "ollama",
   "openai-compatible",
+  "openrouter",
   "mock",
 ];
 
@@ -61,7 +63,17 @@ export class SessionStore {
     await Promise.all([
       this.workspaceState.update(SESSIONS_STORAGE_KEY, undefined),
       this.workspaceState.update(ACTIVE_SESSION_STORAGE_KEY, undefined),
+      this.workspaceState.update(TASK_PLANS_STORAGE_KEY, undefined),
     ]);
+  }
+
+  loadTaskPlans(): Record<string, unknown> {
+    const raw = readState<Record<string, unknown>>(this.workspaceState, STORAGE_KEYS.taskPlans, {});
+    return typeof raw === "object" && raw !== null ? raw : {};
+  }
+
+  async saveTaskPlans(plans: Record<string, unknown>): Promise<void> {
+    await this.workspaceState.update(TASK_PLANS_STORAGE_KEY, plans);
   }
 }
 

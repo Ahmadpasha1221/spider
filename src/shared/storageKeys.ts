@@ -30,6 +30,7 @@ export const STORAGE_KEYS = {
   activeSession: pair("spider.activeSession", "codeviaCursor.activeSession"),
   providerProfiles: pair("spider.providerProfiles", "codeviaCursor.providerProfiles"),
   providerConfig: pair("spider.providerConfig", "codeviaCursor.providerConfig"),
+  taskPlans: pair("spider.taskPlans", "codeviaCursor.taskPlans"),
 } as const;
 
 /** SecretStorage keys. */

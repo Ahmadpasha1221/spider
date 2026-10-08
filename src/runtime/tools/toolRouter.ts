@@ -2,6 +2,7 @@ import type { RuntimeToolCall, RuntimeToolCallResponse, RuntimeToolExecutor, Run
 import { availableToolNames, DEFAULT_AGENT_MODE, type AgentMode } from "./toolAvailability";
 import { getRegisteredTool, listAvailableToolNames } from "./toolRegistry";
 import { toToolErrorInfo, type ToolErrorCode } from "./toolError";
+import { SourceTracingManager } from "../validation/sourceTracing";
 
 export type AuthorizeTool = (
   call: RuntimeToolCall,
@@ -33,6 +34,13 @@ export class ToolRouter {
     }
 
     const input = isRecord(call.input) ? call.input : {};
+    SourceTracingManager.getInstance().record({
+      sessionId: context.session.sessionId,
+      tool: call.name,
+      toolCallId: call.id,
+      boundary: "TOOL_ARGUMENT_NORMALIZED",
+      contentHash: SourceTracingManager.getInstance().computeHash(JSON.stringify(input)),
+    });
     const validationError = tool.validate(input);
     if (validationError) {
       return failure(call.name, validationError, false, "invalid_input");
@@ -41,6 +49,24 @@ export class ToolRouter {
     const permission = await authorize(call, context.signal);
     if (!permission.allowed) {
       return failure(call.name, permission.error ?? "Permission denied.", false, "permission_denied");
+    }
+
+    if (call.name === "finish" && context.validationGate) {
+      const gateEval = context.validationGate.evaluateCanFinish();
+      if (!gateEval.allowed) {
+        return failure(
+          call.name,
+          gateEval.reason ?? "Task cannot finish because unverified or failed files remain.",
+          true,
+          "invalid_input",
+          {
+            validationStatus: gateEval.status,
+            unverifiedFiles: gateEval.unverifiedFiles,
+            failedFiles: gateEval.failedFiles,
+            isGateBlocked: gateEval.status === "blocked",
+          },
+        );
+      }
     }
 
     try {
@@ -56,7 +82,7 @@ export class ToolRouter {
       // classified by code, and the model always gets {success:false, code,
       // error} instead of a raw exception.
       const info = toToolErrorInfo(error);
-      return failure(call.name, info.message, true, info.code);
+      return failure(call.name, info.message, true, info.code, info.details);
     }
   }
 }
@@ -76,11 +102,12 @@ function failure(
   error: string,
   allowed: boolean,
   code?: ToolErrorCode,
+  details?: Record<string, unknown>,
 ): RuntimeToolCallResponse {
   return {
     allowed,
     error,
-    result: { success: false, tool, error, ...(code ? { code } : {}) },
+    result: { success: false, tool, error, ...(code ? { code } : {}), ...(details ?? {}) },
   };
 }
 
