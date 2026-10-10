@@ -6,6 +6,7 @@ import type {
 } from "../runtimeTypes";
 import { RuntimeError, RuntimeUsage } from "../runtimeTypes";
 import { buildAgentSystemPrompt, stripToolCallMarkup } from "./localToolDefinitions";
+import { isConfirm, scanDanger } from "./externalContentGuard";
 import { parseFallbackToolOutput } from "./textToolFallback";
 import { parseNativeToolOutput, type InvalidToolMention, type ParsedToolOutput } from "./parseToolCalls";
 import { availableToolNames, DEFAULT_AGENT_MODE, type AgentMode } from "./toolAvailability";
@@ -104,7 +105,7 @@ export async function runInferenceAgentLoop(
   const allowedTools = availableToolNames(mode);
 
   prepareHistory(history, request.retry === true);
-  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools, request.executionContextSummary, request.rulesContext, request.systemPrompt);
+  ensureSystemPrompt(history, request.modelId, options.nativeTools, allowedTools, request.executionContextSummary, request.rulesContext, request.systemPrompt, request.skillsCatalogPrompt);
   history.push({ role: "user", content: request.prompt });
   await emit({ type: "status", sessionId: request.sessionId, status: "RUNNING", timestamp: Date.now() });
 
@@ -213,6 +214,17 @@ export async function runInferenceAgentLoop(
 
     for (const call of calls) {
       throwIfAborted(request.signal);
+      // Risk 3 quarantine: a prior tool result carrying a dangerous pattern
+      // (pipe-to-shell, credential path, exfil shape) freezes every
+      // state-changing tool until the user replies with explicit
+      // confirmation text. Additive: reads still run; writes/executions wait.
+      const quarantine = checkQuarantine(call, history, request.prompt);
+      if (quarantine.blocked) {
+        const message = quarantine.notice;
+        history.push({ role: "user", content: message });
+        await emit({ type: "assistant_message", sessionId: request.sessionId, message, timestamp: Date.now() });
+        return;
+      }
       SourceTracingManager.getInstance().record({
         sessionId: request.sessionId,
         iteration,
@@ -292,6 +304,22 @@ export async function runInferenceAgentLoop(
   history.push({ role: "assistant", content: message });
   await emit({ type: "assistant_message", sessionId: request.sessionId, message, timestamp: Date.now() });
 }
+const READ_ONLY_QUARANTINE_EXEMPT = new Set(["read_file","read_multiple_files","glob_search","grep_search","codebase_search","fetch_url","search_web","get_problems","list_symbols","go_to_definition","find_references","git_status","git_diff","git_log","git_show","git_blame","repo_map","ask_user"]);
+export function checkQuarantine(call: RuntimeToolCall, history: readonly ChatTurn[], userPrompt?: string): { blocked: boolean; notice: string } {
+  const empty = { blocked: false, notice: "" };
+  if (READ_ONLY_QUARANTINE_EXEMPT.has(call.name)) return empty;
+  const haystack = history.filter((t) => t.role === "tool").map((t) => t.content).join("\n");
+  if (!haystack) return empty;
+  const scan = scanDanger(haystack);
+  if (!scan.dangerous) return empty;
+  const confirmed = isConfirm(userPrompt ?? "") || history.some((t) => t.role === "user" && isConfirm(t.content));
+  if (confirmed) return empty;
+  const kinds = [...new Set(scan.matches.map((m) => m.kind))].join(", ");
+  const first = scan.matches[0];
+  const notice = `Quarantined: refusing ${call.name} until you confirm. Dangerous pattern (${kinds}) was detected in untrusted tool content${first ? ` e.g. "${first.pattern}"` : ""}. ${scan.needConfirm}`;
+  return { blocked: true, notice };
+}
+
 
 function selectToolOutput(completion: ChatCompletion, nativeTools: boolean): ParsedToolOutput {
   if (nativeTools) {
@@ -358,10 +386,11 @@ function ensureSystemPrompt(
   executionContextSummary?: string,
   rulesContext?: string,
   systemPromptOverride?: string,
+  skillsCatalogPrompt?: string,
 ): void {
   // A nested run (subagent) supplies its own role prompt; the default Spider
   // prompt would otherwise describe an orchestrator the subagent is not.
-  const base = systemPromptOverride ?? buildAgentSystemPrompt(modelId, executionContextSummary, rulesContext);
+  const base = systemPromptOverride ?? buildAgentSystemPrompt(modelId, executionContextSummary, rulesContext, skillsCatalogPrompt);
   const prompt = nativeTools ? base : `${base}\n\n${buildFallbackToolContract(allowedTools)}`;
   const existing = history.find((turn) => turn.role === "system");
   if (!existing) {

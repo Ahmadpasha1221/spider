@@ -193,17 +193,70 @@ export class PermissionPolicy {
 }
 
 const DESTRUCTIVE_COMMAND_PATTERNS: ReadonlyArray<RegExp> = [
+  // --- Posix delete (pre-existing + recursive variants) ---
   /\brm\s+(-[a-zA-Z]*f)?\s+/,
+  /\brm\b[^\n;|&]*\s-[a-z]*r[a-z]*\b/,
+  /\brm\b[^\n;|&]*--(force|recursive)\b/,
   /\brmdir\s+/,
+  /\brmdir\b/,
+  // --- Recursive ownership / permission changes ---
+  /\b(chmod|chown|chgrp)\b[^\n;|&]*\s-[a-z]*r[a-z]*\b/,
+  /\b(chmod|chown|chgrp)\b[^\n;|&]*--recursive\b/,
+  // --- Windows destructive delete / disk management ---
+  /\bremove-item\b/,
+  /\brd\s+\/s\b/,
+  /\bdel(\.exe)?\s+[^\n]*\/[sfq]\b/,
+  /\bformat-volume\b/,
+  /\bclear-disk\b/,
+  /\bdiskpart\b/,
+  // --- Destructive git (reset/clean pre-existing + push/branch/stash) ---
   /\bgit\s+reset\s+--hard\b/,
   /\bgit\s+clean\b/,
+  /\bgit\s+push\b[^\n;|&]*--force(-with-lease)?\b/,
+  /\bgit\s+push\b[^\n;|&]*\s-f(\s|$|;|&)/,
+  /\bgit\s+push\b[^\n;|&]*\s\+[a-z0-9_.-]/,
+  /\bgit\s+push\b[^\n;|&]*--(delete|mirror)\b/,
+  // NOTE: input is lower-cased before matching, so -D and -d collapse here.
+  // Flagging both is the safe default for a destructive shield.
+  /\bgit\s+branch\b[^\n;|&]*\s-d\b/,
+  /\bgit\s+stash\s+clear\b/,
+  // --- Pipe-to-shell / remote code execution ---
   /\bsh\s+-c\b/,
-  /\brmdir\b/,
-  /\bdrop\s+database\b/i,
-  /\btruncate\b/i,
-  /\bmkfs\b/,
+  /\|\s*(sudo\s+)?(sh|bash|dash|zsh|fish|powershell|pwsh|cmd)(\s|$|;|&|\||-|"|'|\/)/,
+  // --- Downloader piped to shell / Windows download-and-execute ---
+  /\b(curl|wget)\b[^\n]*\|\s*(sudo\s+)?(sh|bash|dash|zsh|fish|powershell|pwsh|cmd|iex)\b/,
+  /\binvoke-(webrequest|expression)\b/,
+  /\biex\s*\(/,
+  /\bdownloadstring\b/,
+  /\bbitsadmin\b/,
+  /\bcertutil\b[^\n]*urlcache\b/,
+  // --- Credential access / network exfiltration / secret upload ---
+  /\.ssh\/(id_rsa|id_ed25519|id_ecdsa|authorized_keys)/,
+  /\b(id_rsa|id_ed25519)\b/,
+  /\/etc\/(shadow|gshadow|passwd)\b/,
+  /\.aws\/credentials\b/,
+  /\b(env|printenv)\b[^\n]*\|\s*(curl|wget|nc|ncat)\b/,
+  /\b(cat|less|more|head|tail|type)\b[^\n]*(\.env\b|\.ssh\/|id_rsa|id_ed25519|\.pem\b|\/etc\/(shadow|passwd)|credentials)/,
+  /\b(nc|ncat|netcat)\b[^\n]*\s-[a-z]*e[a-z]*\b/,
+  /\bncat\b[^\n]*--exec\b/,
+  /\bsocat\b[^\n]*exec\b/,
+  /\bgpg\b[^\n]*--export-secret-keys\b/,
+  /\b(scp|sftp|rsync)\b\s+[^\n]*@/,
+  /\bcurl\b[^\n]*(-F\b|--data(-binary)?\b|--upload-file\b)/,
+  // --- Disk / filesystem destroyers (pre-existing + variants) ---
+  /\bmkfs(\.[a-z0-9]+)?\b/,
+  /\bmke2fs\b/,
+  /\bwipefs\b/,
+  /\bshred\b/,
+  /\bblkdiscard\b/,
+  /\b(fdisk|sfdisk|parted)\b/,
+  /\bdd\b[^\n]*\bof=\/dev\//,
   /\bdd\s+if=.*of=/,
   /\bformat\s+[a-z]/,
+  /\bformat\s+[a-z]:/,
+  // --- Database destruction (pre-existing broad truncate kept) ---
+  /\bdrop\s+(database|table|schema)\b/,
+  /\btruncate\b/,
 ];
 
 export function createDefaultPermissionPolicy(

@@ -21,6 +21,12 @@ import { MAX_SYMBOLS } from "./symbolTools";
 import { MAX_DEFINITIONS, MAX_REFERENCES } from "./navigationTools";
 import { MAX_PROBLEMS } from "./problemsTool";
 import { APPROVED_TEST_RUNNERS, TEST_RUN_LIMITS } from "./runTestsTool";
+import {
+  isSafeRelativePath,
+  validateSkillName,
+  validateScriptArgument,
+  SKILL_SECURITY_LIMITS,
+} from "../skills/skillSecurity";
 
 /**
  * The registry is the single source of truth for tools. Names, descriptions,
@@ -736,13 +742,13 @@ const TOOLS: readonly RegisteredTool[] = [
   // ---- Network (Phase 3) -----------------------------------------------
   workspaceTool({
     name: "fetch_url",
-    description: "Retrieve the contents of one specific URL (https, or http for localhost loopback dev servers). This is not a web search; you must supply the URL.",
+    description: "Retrieve the contents of one specific URL (https; loopback dev servers only when the spider.fetch.allowLocalNetwork setting is enabled). This is not a web search; you must supply the URL.",
     permission: "external",
     category: "network",
     parameters: {
       type: "object",
       properties: {
-        url: { type: "string", description: "Absolute URL to retrieve (https, or http://localhost… for a local dev server)." },
+        url: { type: "string", description: "Absolute URL to retrieve (https; http://localhost… only when loopback access is enabled)." },
         maxBytes: {
           type: "number",
           description: `Maximum response bytes to read (default ${fetchUrlTool.FETCH_LIMITS.defaultMaxBytes}, maximum ${fetchUrlTool.FETCH_LIMITS.maxBytesLimit}).`,
@@ -1076,6 +1082,193 @@ const TOOLS: readonly RegisteredTool[] = [
             ? input.task.trim().slice(0, 60)
             : "";
       return description ? `Researching: ${description}…` : "Researching with a subagent…";
+    },
+  }),
+
+  // ---- Agent Skills (Microsoft Agent Skills ADR 0037 & agentskills.io) ----
+  workspaceTool({
+    name: "list_skills",
+    description: "List all discovered agent skills with their scope, status, and summary. Does not load full instructions into context.",
+    permission: "safe",
+    category: "workflow",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Optional search query to filter skills by name or description." },
+        scope: {
+          type: "string",
+          enum: ["workspace", "global", "bundled", "imported"],
+          description: "Optional scope filter to restrict listing.",
+        },
+      },
+    },
+    exampleArguments: {},
+    validate: (input) => {
+      if (input.query !== undefined && typeof input.query !== "string") {
+        return "query must be a string.";
+      }
+      if (
+        input.scope !== undefined &&
+        (typeof input.scope !== "string" || !["workspace", "global", "bundled", "imported"].includes(input.scope))
+      ) {
+        return 'scope must be "workspace", "global", "bundled", or "imported".';
+      }
+      return undefined;
+    },
+    summarize: () => "Listing available agent skills…",
+  }),
+  workspaceTool({
+    name: "load_skill",
+    description: "Load the full instructions, guidelines, and resource manifest of an agent skill into context by skill name.",
+    permission: "safe",
+    category: "workflow",
+    parameters: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "The name of the skill to load (must match ^[a-z0-9]+(?:-[a-z0-9]+)*$).",
+        },
+      },
+      required: ["name"],
+    },
+    required: ["name"],
+    exampleArguments: { name: "frappe-expert" },
+    validate: (input) => {
+      const name = stringInput(input, "name");
+      if (!name) {
+        return "Missing required argument: name";
+      }
+      const validation = validateSkillName(name);
+      if (!validation.valid) {
+        return `Invalid skill name "${name}": ${validation.error}`;
+      }
+      return undefined;
+    },
+    summarize: (input) => {
+      const name = stringInput(input, "name");
+      return name ? `Loading skill ${name}…` : "Loading skill…";
+    },
+  }),
+  workspaceTool({
+    name: "read_skill_resource",
+    description: "Read a supporting reference or asset file from an agent skill's resources (e.g. references/guide.md, assets/template.json).",
+    permission: "safe",
+    category: "filesystem",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The name of the skill." },
+        path: {
+          type: "string",
+          description: "Relative path inside the skill directory (e.g. references/guide.md, assets/schema.json).",
+        },
+      },
+      required: ["name", "path"],
+    },
+    required: ["name", "path"],
+    exampleArguments: { name: "frappe-expert", path: "references/guide.md" },
+    validate: (input) => {
+      const name = stringInput(input, "name");
+      if (!name) {
+        return "Missing required argument: name";
+      }
+      const path = stringInput(input, "path");
+      if (!path) {
+        return "Missing required argument: path";
+      }
+      const nameVal = validateSkillName(name);
+      if (!nameVal.valid) {
+        return `Invalid skill name "${name}": ${nameVal.error}`;
+      }
+      if (!isSafeRelativePath(path)) {
+        return `Invalid or unsafe resource path: ${path}`;
+      }
+      return undefined;
+    },
+    summarize: (input) => {
+      const name = stringInput(input, "name");
+      const path = stringInput(input, "path");
+      return name && path ? `Reading skill resource ${path} from ${name}…` : "Reading skill resource…";
+    },
+  }),
+  workspaceTool({
+    name: "run_skill_script",
+    description: "Execute a script bundled with an agent skill (e.g. scripts/validate.py). Requires user approval and execution authorization.",
+    permission: "execute",
+    category: "terminal",
+    parameters: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "The name of the skill containing the script." },
+        script: {
+          type: "string",
+          description: "Relative path to the script inside the skill directory (e.g. scripts/validate.py).",
+        },
+        args: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional arguments to pass to the script.",
+        },
+        timeoutMs: {
+          type: "number",
+          description: "Maximum execution time in milliseconds (default 30000ms).",
+        },
+      },
+      required: ["name", "script"],
+    },
+    required: ["name", "script"],
+    exampleArguments: { name: "python-expert", script: "scripts/validate.py", args: ["--check"] },
+    validate: (input) => {
+      const name = stringInput(input, "name");
+      if (!name) {
+        return "Missing required argument: name";
+      }
+      const script = stringInput(input, "script");
+      if (!script) {
+        return "Missing required argument: script";
+      }
+      const nameVal = validateSkillName(name);
+      if (!nameVal.valid) {
+        return `Invalid skill name "${name}": ${nameVal.error}`;
+      }
+      if (!isSafeRelativePath(script)) {
+        return `Invalid or unsafe script path: ${script}`;
+      }
+      if (!script.startsWith("scripts/")) {
+        return `Skill script "${script}" must reside inside the "scripts/" directory.`;
+      }
+      if (input.args !== undefined) {
+        if (!Array.isArray(input.args)) {
+          return "args must be an array of strings.";
+        }
+        if (input.args.length > SKILL_SECURITY_LIMITS.maxScriptArgs) {
+          return `args cannot exceed ${SKILL_SECURITY_LIMITS.maxScriptArgs} items.`;
+        }
+        for (const a of input.args) {
+          if (typeof a !== "string") {
+            return "Every entry in args must be a string.";
+          }
+          const argCheck = validateScriptArgument(a);
+          if (!argCheck.valid) {
+            return argCheck.error ?? "Invalid script argument.";
+          }
+        }
+      }
+      if (input.timeoutMs !== undefined) {
+        if (typeof input.timeoutMs !== "number" || !Number.isFinite(input.timeoutMs) || input.timeoutMs <= 0) {
+          return "timeoutMs must be a positive number.";
+        }
+        if (input.timeoutMs > SKILL_SECURITY_LIMITS.maxScriptTimeoutMs) {
+          return `timeoutMs cannot exceed ${SKILL_SECURITY_LIMITS.maxScriptTimeoutMs}ms.`;
+        }
+      }
+      return undefined;
+    },
+    summarize: (input) => {
+      const name = stringInput(input, "name");
+      const script = stringInput(input, "script");
+      return name && script ? `Running script ${script} from ${name}…` : "Running skill script…";
     },
   }),
 

@@ -14,6 +14,11 @@ import {
   type CheckpointSummary,
 } from "./checkpoints/checkpointManager";
 import {
+  createGitSnapshot,
+  restoreGitSnapshot,
+  type GitExecFn,
+} from "./checkpoints/gitCheckpoint";
+import {
   SUBAGENT_LIMITS,
   buildSubagentSystemPrompt,
   clampSubagentSummary,
@@ -54,6 +59,10 @@ import {
   ProviderUnavailableError,
   ProviderConfigurationMismatchError,
 } from "./provider/modelProvider";
+import { SkillRegistry } from "./skills/skillRegistry";
+import { WorkspaceSkillSource, UserGlobalSkillSource, BundledSkillSource } from "./skills/skillSource";
+import { formatSkillCatalogPrompt } from "./skills/skillPrompt";
+import { redactSensitiveString } from "./skills/skillSecurity";
 
 export interface RuntimeManagerOptions {
   readonly sessionStore: SessionStore;
@@ -69,6 +78,11 @@ export interface RuntimeManagerOptions {
   /** Injected background-process manager; disposed with the runtime. */
   readonly backgroundProcesses?: import("./tools/backgroundProcessManager").BackgroundProcessManager;
   /**
+   * Shell used for git snapshot capture/restore. Injected in tests; defaults to
+   * a `git` child process. Never throws — failures degrade to "no snapshot".
+   */
+  readonly gitExec?: GitExecFn;
+  /**
    * Authoritative execution-context resolver. When present, its safe summary is
    * injected into the agent prompt so the model knows where commands run.
    */
@@ -80,6 +94,11 @@ export interface RuntimeManagerOptions {
    * apply. Best-effort: a failing loader never blocks a run.
    */
   readonly rulesLoader?: (workspacePath: string) => Promise<string | undefined>;
+  /**
+   * Discovered agent skills registry (ADR 0037). When provided, skills
+   * are advertised in the system prompt and tool calls route to it.
+   */
+  readonly skillRegistry?: SkillRegistry;
 }
 
 interface ActiveRun {
@@ -132,6 +151,14 @@ function describePermissionTarget(input: Record<string, unknown>): string | unde
   }
   if (typeof input.file_path === "string") {
     return input.file_path;
+  }
+  if (typeof input.script === "string") {
+    const skillName = typeof input.name === "string" ? input.name : "skill";
+    const argsList = Array.isArray(input.args)
+      ? input.args.filter((a): a is string => typeof a === "string").map((a) => redactSensitiveString(a))
+      : [];
+    const argsDesc = argsList.length > 0 ? ` (args: ${argsList.join(" ")})` : "";
+    return `${skillName}:${input.script}${argsDesc}`;
   }
   if (typeof input.path === "string") {
     return input.path;
@@ -207,6 +234,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   private readonly userQuestions = new UserQuestionBroker();
   /** Per-conversation task plan (structured agent state, never the transcript). */
   private readonly taskPlans = new TaskPlanStore();
+  private skillRegistry?: SkillRegistry;
 
   /**
    * Live command-output buffers, keyed by toolCallId. Chunks are coalesced and
@@ -246,6 +274,24 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
         });
       }
     });
+    this.skillRegistry = options.skillRegistry;
+  }
+
+  getSkillRegistry(workspacePath?: string): SkillRegistry {
+    if (this.skillRegistry) {
+      return this.skillRegistry;
+    }
+    const effectiveWorkspace = workspacePath ?? this.options.defaultWorkspacePath ?? ".";
+    this.skillRegistry = new SkillRegistry([
+      new WorkspaceSkillSource(effectiveWorkspace),
+      new UserGlobalSkillSource(),
+      new BundledSkillSource(),
+    ]);
+    return this.skillRegistry;
+  }
+
+  setSkillRegistry(registry: SkillRegistry | undefined): void {
+    this.skillRegistry = registry;
   }
 
   /** Resolves a pending `ask_user` question. Returns false for a stale id. */
@@ -257,7 +303,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
         const current = plan.items.find((t) => t.id === plan.currentTaskId);
         if (current && current.status === "blocked") {
           const updated = this.taskPlans.startTask(this.activeSessionId, plan.currentTaskId);
-          void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
+          void this.options.sessionStore.saveTaskPlans(this.taskPlans.serialize());
           this.publishEvent({ type: "todo_updated", sessionId: this.activeSessionId, plan: updated, timestamp: Date.now() });
         }
       }
@@ -294,9 +340,38 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
   }
 
   /**
+   * Manual checkpoint between messages (course-parity W7): captures the current
+   * file-change boundary plus a best-effort git stash snapshot, persists the
+   * timeline, and returns the updated timeline. Never throws for git failures;
+   * a non-repo workspace simply gets a file-timeline checkpoint.
+   */
+  async createCheckpoint(sessionId: string, label = "Manual checkpoint"): Promise<CheckpointSummary[]> {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new RuntimeError("session_not_found", `Session not found: ${sessionId}`);
+    }
+    const checkpointId = crypto.randomUUID();
+    const git = await this.captureGitSnapshot(session.workspacePath, label, checkpointId);
+    this.checkpoints.create(
+      sessionId,
+      label,
+      this.reviewManager.listChanges(sessionId).length,
+      git,
+      checkpointId,
+    );
+    await this.persistCheckpoints();
+    return this.listCheckpoints(sessionId);
+  }
+
+  /**
    * Rolls the workspace back to a checkpoint: reverts every recorded change
-   * applied after it (newest first), then drops the later checkpoints. Returns
+   * applied after it (newest first), best-effort re-applies the git stash
+   * snapshot, then drops the later checkpoints. Returns
    * the surviving timeline, or undefined when the id is unknown.
+   *
+   * Shell side-effects are NOT revertible: commands already executed
+   * (`run_command`), background processes, and network effects cannot be
+   * undone by this restore.
    */
   async restoreCheckpoint(
     checkpointId: string,
@@ -326,13 +401,57 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
         // Best-effort per file: one failure must not abort the restore.
       }
     }
+    // Git layer: re-apply the pre-run stash snapshot when one exists. Missing
+    // or expired stash entries are a no-op — the file-timeline revert above is
+    // still the primary guarantee.
+    if (checkpoint.gitStashMessage) {
+      try {
+        await restoreGitSnapshot(workspacePath, checkpoint.gitStashMessage, this.options.gitExec);
+      } catch {
+        // Best-effort: never fail a restore on git.
+      }
+    }
     this.checkpoints.truncateFrom(checkpointId);
+    await this.persistCheckpoints();
     this.recordTranscript(sessionId, {
       kind: "system",
       text: `Restored checkpoint: ${checkpoint.label}`,
       timestamp: Date.now(),
     });
     return { sessionId, items: this.listCheckpoints(sessionId) };
+  }
+
+  /**
+   * Best-effort git stash capture. Returns the stash coordinates for
+   * `CheckpointManager.create`, or undefined when there is no repo, no
+   * changes, or git is unavailable. Never throws.
+   */
+  private async captureGitSnapshot(
+    workspacePath: string,
+    label: string,
+    checkpointId: string,
+  ): Promise<{ message?: string; ref?: string } | undefined> {
+    try {
+      const snapshot = await createGitSnapshot(workspacePath, label, checkpointId, this.options.gitExec);
+      if (!snapshot.supported || snapshot.empty || !snapshot.message) {
+        return undefined;
+      }
+      return {
+        message: snapshot.message,
+        ...(snapshot.ref ? { ref: snapshot.ref } : {}),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Persists the checkpoint timeline; best-effort so git/checkpoints never break runs. */
+  private async persistCheckpoints(): Promise<void> {
+    try {
+      await this.options.sessionStore.saveCheckpoints?.(this.checkpoints.serialize());
+    } catch {
+      // Persistence must never break a run or restore.
+    }
   }
 
   /**
@@ -755,6 +874,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     void this.options.sessionStore.saveTaskPlans?.(this.taskPlans.serialize());
     this.restoredHistories.delete(sessionId);
     this.checkpoints.clearSession(sessionId);
+    await this.persistCheckpoints();
     try {
       await this.options.transcriptStore?.delete(sessionId);
     } catch {
@@ -819,6 +939,16 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     this.activeSessionId = undefined;
     const loadedPlans = this.options.sessionStore.loadTaskPlans?.() ?? {};
     this.taskPlans.restore(loadedPlans);
+    // Checkpoint timeline survives restarts via workspace state (Risk 1). File
+    // revert data itself stays in-memory, so only the timeline (labels +
+    // boundaries + stash refs) is restored; missing stash entries degrade to
+    // file-timeline restore.
+    try {
+      const stored = this.options.sessionStore.loadCheckpoints?.() ?? {};
+      this.checkpoints.restore(stored);
+    } catch {
+      // Corrupt checkpoint state must never break session restore.
+    }
 
     const resolvedConfig = resolveRuntimeModelConfig({
       activeConfig: this.getProviderConfig(),
@@ -889,8 +1019,19 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
       timestamp: Date.now(),
     });
     // Snapshot the timeline boundary before this run mutates anything, so the
-    // user can roll back to "before the agent ran" (A2).
-    this.checkpoints.create(sessionId, prompt, this.reviewManager.listChanges(sessionId).length);
+    // user can roll back to "before the agent ran" (A2). A best-effort git
+    // stash snapshot backs the checkpoint when inside a repo; non-repos and
+    // clean trees simply get the file-timeline checkpoint.
+    const preRunCheckpointId = crypto.randomUUID();
+    const preRunGit = await this.captureGitSnapshot(session.workspacePath, prompt, preRunCheckpointId);
+    this.checkpoints.create(
+      sessionId,
+      prompt,
+      this.reviewManager.listChanges(sessionId).length,
+      preRunGit,
+      preRunCheckpointId,
+    );
+    await this.persistCheckpoints();
 
     // Agent mode is an internal runtime concern, never a user choice: the
     // shipped path always runs with the full registered tool set so the model
@@ -971,6 +1112,16 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
       } catch {
         rulesContext = undefined;
       }
+      // Skills catalog: context-budgeted skill descriptions for prompt advertising
+      let skillsCatalogPrompt: string | undefined;
+      try {
+        const registry = this.getSkillRegistry(session.workspacePath);
+        await registry.discoverSkills();
+        const enabledSkills = registry.getEnabledSkills();
+        skillsCatalogPrompt = formatSkillCatalogPrompt(enabledSkills);
+      } catch {
+        skillsCatalogPrompt = undefined;
+      }
       const effectiveModelId = resolvedConfig.modelId ?? session.modelId ?? this.getModelId(resolvedConfig.provider);
       await runtime.sendMessage(
         {
@@ -983,6 +1134,7 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
           mode,
           ...(executionContextSummary ? { executionContextSummary } : {}),
           ...(rulesContext ? { rulesContext } : {}),
+          ...(skillsCatalogPrompt ? { skillsCatalogPrompt } : {}),
           signal: controller.signal,
           onToolCall: (call, signal) => this.handleToolCall(sessionId, call, signal, mode),
           onStreamDelta: (text) => {
@@ -1410,7 +1562,30 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
     }
 
     const input = isRecord(call.input) ? call.input : {};
-    const command = typeof input.command === "string" ? input.command : undefined;
+    let command = typeof input.command === "string" ? redactSensitiveString(input.command) : undefined;
+    if (call.name === "run_skill_script") {
+      const skillName = typeof input.name === "string" ? input.name : "skill";
+      const script = typeof input.script === "string" ? input.script : "script";
+      const argsList = Array.isArray(input.args)
+        ? input.args.filter((a): a is string => typeof a === "string").map((a) => redactSensitiveString(a))
+        : [];
+      let envLabel = "host execution (non-sandboxed)";
+      if (this.options.executionManager) {
+        try {
+          const resolved = this.options.executionManager.resolve(session.workspacePath);
+          if (resolved.backend === "wsl") {
+            envLabel = `WSL (${resolved.wslDistro ?? "default"})`;
+          } else if (resolved.executionType === "remote") {
+            envLabel = `remote (${resolved.remoteAuthority ?? "container"})`;
+          } else {
+            envLabel = `host execution (${resolved.platform}, non-sandboxed)`;
+          }
+        } catch {
+          // Keep default fallback label
+        }
+      }
+      command = `[skill:${skillName}] ${script}${argsList.length > 0 ? ` ${argsList.join(" ")}` : ""} [cwd: ${session.workspacePath}] [env: ${envLabel}]`;
+    }
     const path = describePermissionTarget(input);
     const request = this.options.permissionManager.buildRequest(
       session.sessionId,
@@ -1695,7 +1870,9 @@ function transcriptEntryFromEvent(event: RuntimeEvent): TranscriptEntry | undefi
                 ? { path: event.toolCall.input.path }
                 : typeof event.toolCall.input.file_path === "string"
                   ? { path: event.toolCall.input.file_path }
-                  : {}),
+                  : typeof event.toolCall.input.script === "string"
+                    ? { path: typeof event.toolCall.input.name === "string" ? `${event.toolCall.input.name}:${event.toolCall.input.script}` : event.toolCall.input.script }
+                    : {}),
             }
           : {}),
       };

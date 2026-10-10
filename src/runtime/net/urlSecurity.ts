@@ -37,13 +37,15 @@ export const ALLOWED_PROTOCOLS: readonly string[] = ["https:"];
 /**
  * Local-network policy for `fetch_url`. Loopback access (the developer's own
  * machine: `localhost`, `127.0.0.0/8`, `::1`) is a separate question from
- * public-web access. When `allowLocalNetwork` is set, loopback destinations
- * are reachable over `http:` or `https:` — the common case is a local dev
- * server (`http://localhost:3000`). Everything else (LAN ranges, link-local,
- * cloud metadata, DNS that resolves non-loopback) stays blocked exactly as
- * before. Loopback still requires the tool's `external` permission, so the
- * user approves the request; this policy only decides what the user *can*
- * approve.
+ * public-web access. Loopback is **denied by default**; when
+ * `allowLocalNetwork` is explicitly set to `true` (opt-in via the
+ * `spider.fetch.allowLocalNetwork` setting, default `false`), loopback
+ * destinations are reachable over `http:` or `https:` — the common case is a
+ * local dev server (`http://localhost:3000`). Everything else (LAN ranges,
+ * link-local, cloud metadata, DNS that resolves non-loopback) stays blocked
+ * exactly as before. Loopback still requires the tool's `external`
+ * permission, so the user approves the request; this policy only decides what
+ * the user *can* approve.
  */
 export interface LocalNetworkPolicy {
   readonly allowLocalNetwork?: boolean;
@@ -182,15 +184,27 @@ export async function assertPublicUrl(url: URL, resolveHost: HostResolver): Prom
 }
 
 /**
- * Policy-aware destination check. Under `allowLocalNetwork`, loopback
- * destinations pass for `http:` and `https:`; every other destination follows
- * the strict public rules (https only, no private/link-local/metadata, DNS
- * verified) regardless of policy.
+ * Policy-aware destination check. Loopback destinations are denied unless
+ * `allowLocalNetwork === true` (opt-in via `spider.fetch.allowLocalNetwork`,
+ * default `false`); under the opt-in they pass for `http:` and `https:`.
+ * Every other destination follows the strict public rules (https only, no
+ * private/link-local/metadata, DNS verified) regardless of policy. Callers
+ * must invoke this on the original URL **and re-invoke it on every redirect
+ * target** (`fetch_url` does so in its redirect loop), so each hop's DNS is
+ * resolved and checked afresh.
  *
- * Known limitation: DNS is checked once before the request (TOCTOU). A
- * hostile name could re-resolve between check and connect; the policy narrows
- * the reachable set but does not eliminate rebinding. Loopback-only allowance
- * keeps the blast radius at the developer's own machine.
+ * Known limitation (DNS rebinding, TOCTOU): DNS is resolved once per hop,
+ * immediately before that hop's request, but the address is still checked
+ * before the TCP connect rather than pinned to it. A hostile DNS server can
+ * serve a benign address at check time and a private/loopback address at
+ * connect time (short TTL + rapid record swap). This module cannot eliminate
+ * that race without connection-level IP pinning (custom dialer / DoH with
+ * validation), which the current `fetch`-based transport does not provide.
+ * The default-deny loopback policy narrows the reachable set so a rebinding
+ * attack cannot reach the local machine unless the user explicitly opted in;
+ * enabling `allowLocalNetwork` re-opens loopback as a rebinding target on
+ * the developer's own machine (LAN/metadata ranges stay unreachable either
+ * way, and the `external` permission still gates every request).
  */
 export async function assertFetchableUrl(url: URL, resolveHost: HostResolver, policy: LocalNetworkPolicy): Promise<void> {
   if (url.protocol !== "https:" && url.protocol !== "http:") {

@@ -33,6 +33,8 @@ import { createVSCodeLanguageSource } from "./runtime/lsp/languageSource";
 import { BackgroundProcessManager } from "./runtime/tools/backgroundProcessManager";
 import { createStoredWebSearchProvider } from "./runtime/net/webSearchProvider";
 import { DiffViewService } from "./runtime/review/diffView";
+import { SkillRegistry } from "./runtime/skills/skillRegistry";
+import { WorkspaceSkillSource, UserGlobalSkillSource, BundledSkillSource } from "./runtime/skills/skillSource";
 
 const logger = new Logger(EXTENSION_NAME, "INFO");
 
@@ -119,6 +121,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // injected into the agent system prompt by the runtime.
   const workspaceRulesService = new WorkspaceRulesService();
   context.subscriptions.push(workspaceRulesService);
+  // Discovered agent skills (ADR 0037): Multi-source discovery across
+  // workspace, user global, and bundled skill repositories.
+  const skillRegistry = new SkillRegistry([
+    new WorkspaceSkillSource(getWorkspacePath()),
+    new UserGlobalSkillSource(),
+    new BundledSkillSource(),
+  ]);
+
   const toolExecutor = new WorkspaceToolExecutor({
     diagnostics: createVSCodeDiagnosticsSource(),
     editor: createVSCodeEditorContextSource(),
@@ -126,6 +136,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     backgroundProcesses,
     webSearch,
     executionManager,
+    skillRegistry,
   });
   const runtimeManager = new RuntimeManager({
     sessionStore,
@@ -140,6 +151,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     providerConfigStore,
     executionManager,
     rulesLoader: (workspacePath) => workspaceRulesService.getRulesContext(workspacePath),
+    skillRegistry,
   });
   // The runtime orchestrates subagents (it owns runtimes, tool routing and
   // permissions); the executor was built first, so inject it after construction.

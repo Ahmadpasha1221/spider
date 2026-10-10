@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { RuntimeToolCall, RuntimeToolExecutor, RuntimeToolExecutorContext } from "../runtimeTypes";
-import { runWorkspaceCommand } from "./commandRunner";
+import { runWorkspaceCommand, runWorkspaceArgvCommand } from "./commandRunner";
 import type { ExecutionManager } from "../execution/executionManager";
 import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
 import { isLocalToolName, type LocalToolName } from "./toolRegistry";
@@ -40,6 +40,9 @@ import { SourceTracingManager } from "../validation/sourceTracing";
 import { validateSourceIntegrity, type SourceValidationDiagnostic } from "../validation/sourceIntegrityValidator";
 import { validateDependencies } from "../validation/dependencyValidator";
 import { ValidationGate } from "../validation/validationGate";
+import { SkillRegistry } from "../skills/skillRegistry";
+import { WorkspaceSkillSource, UserGlobalSkillSource, BundledSkillSource } from "../skills/skillSource";
+import { listSkills, loadSkill, readSkillResource, runSkillScript } from "./skillTools";
 
 const MAX_SEARCH_MATCHES = 50;
 const MAX_LIST_ENTRIES = 200;
@@ -56,6 +59,11 @@ export interface WorkspaceToolExecutorOptions {
   /** Overridable network access for fetch_url (tests, alternative hosts). */
   readonly fetch?: typeof fetch;
   readonly resolveHost?: HostResolver;
+  /**
+   * Opt-in loopback access for fetch_url (mirrors the
+   * `spider.fetch.allowLocalNetwork` setting). Defaults to false.
+   */
+  readonly allowLocalNetwork?: boolean;
   /** Web-search provider for search_web (absent when no provider is configured). */
   readonly webSearch?: WebSearchProvider;
   /** Language intelligence (symbols/definition/references) for Phase 5 tools. */
@@ -67,11 +75,18 @@ export interface WorkspaceToolExecutorOptions {
   readonly executionManager?: ExecutionManager;
   /** Overridable command runner (tests, alternative hosts). */
   readonly runCommand?: typeof runWorkspaceCommand;
+  /** Overridable argv command runner for shell-less execution (tests, alternative hosts). */
+  readonly runArgvCommand?: typeof runWorkspaceArgvCommand;
   /**
    * Subagent orchestrator (see subagent.ts). Injected by the runtime after
    * construction; absent outside a host that can run nested agent loops.
    */
   readonly subagents?: SubagentRunner;
+  /**
+   * Discovered agent skills registry (ADR 0037). When provided, tool calls
+   * query this registry; otherwise a default registry is lazily initialized.
+   */
+  readonly skillRegistry?: SkillRegistry;
 }
 
 export class WorkspaceToolExecutor implements RuntimeToolExecutor {
@@ -85,7 +100,9 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
   private readonly language?: LanguageSource;
   private readonly executionManager?: ExecutionManager;
   private readonly runCommandFn: typeof runWorkspaceCommand;
+  private readonly runArgvCommandFn: typeof runWorkspaceArgvCommand;
   private subagents?: SubagentRunner;
+  private skillRegistry?: SkillRegistry;
 
   constructor(options: WorkspaceToolExecutorOptions = {}) {
     this.diagnostics = options.diagnostics;
@@ -98,7 +115,9 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
     this.language = options.language;
     this.executionManager = options.executionManager;
     this.runCommandFn = options.runCommand ?? runWorkspaceCommand;
+    this.runArgvCommandFn = options.runArgvCommand ?? runWorkspaceArgvCommand;
     this.subagents = options.subagents;
+    this.skillRegistry = options.skillRegistry;
   }
 
   /**
@@ -108,6 +127,26 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
    */
   setSubagentRunner(runner: SubagentRunner | undefined): void {
     this.subagents = runner;
+  }
+
+  setSkillRegistry(registry: SkillRegistry | undefined): void {
+    this.skillRegistry = registry;
+  }
+
+  getSkillRegistry(): SkillRegistry | undefined {
+    return this.skillRegistry;
+  }
+
+  private getEffectiveSkillRegistry(workspacePath: string): SkillRegistry {
+    if (this.skillRegistry) {
+      return this.skillRegistry;
+    }
+    this.skillRegistry = new SkillRegistry([
+      new WorkspaceSkillSource(workspacePath),
+      new UserGlobalSkillSource(),
+      new BundledSkillSource(),
+    ]);
+    return this.skillRegistry;
   }
 
   async execute(call: RuntimeToolCall, context: RuntimeToolExecutorContext): Promise<unknown> {
@@ -308,6 +347,31 @@ export class WorkspaceToolExecutor implements RuntimeToolExecutor {
         return runTests(input, { workspacePath, ...(context.signal ? { signal: context.signal } : {}) }, {
           backgroundProcesses: this.backgroundProcesses,
           ...(this.executionManager ? { executionManager: this.executionManager } : {}),
+        });
+      case "list_skills":
+        return listSkills(input, {
+          registry: this.getEffectiveSkillRegistry(workspacePath),
+          signal: context.signal,
+        });
+      case "load_skill":
+        return loadSkill(input, {
+          registry: this.getEffectiveSkillRegistry(workspacePath),
+          signal: context.signal,
+        });
+      case "read_skill_resource":
+        return readSkillResource(input, {
+          registry: this.getEffectiveSkillRegistry(workspacePath),
+          signal: context.signal,
+        });
+      case "run_skill_script":
+        return runSkillScript(input, {
+          registry: this.getEffectiveSkillRegistry(workspacePath),
+          signal: context.signal,
+          workspacePath,
+          runArgvCommand: (executable, args, cwd, timeoutMs, signal, env) =>
+            this.runArgvCommand(workspacePath, executable, args, cwd, timeoutMs, signal, context.onOutput, env),
+          runCommand: (cmd, cwd, timeoutMs, signal, env) =>
+            this.runCommand(workspacePath, cmd, cwd, timeoutMs, signal, context.onOutput, env),
         });
       default:
         throw new ToolExecutionError("invalid_input", `Unknown tool: ${name}`);
@@ -695,23 +759,52 @@ ${formattedErrors}
     }
   }
 
-  private async runCommand(
+   private async runCommand(
+     workspacePath: string,
+     command: string,
+     cwd: string | undefined,
+     timeoutMs: number | undefined,
+     signal?: AbortSignal,
+     onOutput?: (stream: "stdout" | "stderr", chunk: string) => void,
+     env?: Record<string, string>,
+   ): Promise<unknown> {
+     const hostPlatform = this.executionManager?.getEnvironment().hostPlatform;
+     const pathMod = hostPlatform === "win32" ? path.win32 : path.posix;
+     const hostDirectory = await resolveWorkspacePathSafe(workspacePath, cwd && cwd.length > 0 ? cwd : ".", pathMod);
+     const { context, directory: executionDirectory } = this.resolveExecution(workspacePath, hostDirectory);
+     const effectiveContext = env ? { ...context, env: { ...env } } : context;
+     return this.runCommandFn({
+       command,
+       cwd: executionDirectory,
+       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+       signal,
+       ...(onOutput ? { onOutput } : {}),
+       context: effectiveContext,
+     });
+   }
+
+
+  private async runArgvCommand(
     workspacePath: string,
-    command: string,
+    executable: string,
+    args: readonly string[],
     cwd: string | undefined,
     timeoutMs: number | undefined,
     signal?: AbortSignal,
     onOutput?: (stream: "stdout" | "stderr", chunk: string) => void,
+    env?: Record<string, string>,
   ): Promise<unknown> {
     const hostDirectory = await resolveWorkspacePathSafe(workspacePath, cwd && cwd.length > 0 ? cwd : ".");
     const { context, directory: executionDirectory } = this.resolveExecution(workspacePath, hostDirectory);
-    return this.runCommandFn({
-      command,
+    return this.runArgvCommandFn({
+      executable,
+      args,
       cwd: executionDirectory,
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
       signal,
       ...(onOutput ? { onOutput } : {}),
       context,
+      ...(env ? { env } : {}),
     });
   }
 

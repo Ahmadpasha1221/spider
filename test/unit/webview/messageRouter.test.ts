@@ -244,6 +244,20 @@ describe("MessageRouter", () => {
     });
   });
 
+  it("routes CHECKPOINT_NOW to runtimeManager.createCheckpoint", async () => {
+    const agentManager = {} as unknown as AgentManager;
+    const items = [{ id: "cp-2", label: "Manual checkpoint", timestamp: 2000, changeCount: 1 }];
+    const runtimeManager = {
+      createCheckpoint: vi.fn().mockResolvedValue(items),
+    };
+
+    const router = new MessageRouter(agentManager, ".", undefined, undefined, runtimeManager as never);
+    const result = await router.handleMessage({ type: "CHECKPOINT_NOW", sessionId: "session-1", label: "halfway" });
+
+    expect(runtimeManager.createCheckpoint).toHaveBeenCalledWith("session-1", "halfway");
+    expect(result).toEqual({ type: "CHECKPOINTS", sessionId: "session-1", items });
+  });
+
   it("rejects malformed GET_CHECKPOINTS and RESTORE_CHECKPOINT messages", async () => {
     const router = new MessageRouter({} as unknown as AgentManager);
 
@@ -251,6 +265,8 @@ describe("MessageRouter", () => {
     await expect(router.handleMessage({ type: "GET_CHECKPOINTS", sessionId: 123 })).rejects.toThrow("Invalid GET_CHECKPOINTS message");
     await expect(router.handleMessage({ type: "RESTORE_CHECKPOINT" })).rejects.toThrow("Invalid RESTORE_CHECKPOINT message");
     await expect(router.handleMessage({ type: "RESTORE_CHECKPOINT", checkpointId: null })).rejects.toThrow("Invalid RESTORE_CHECKPOINT message");
+    await expect(router.handleMessage({ type: "CHECKPOINT_NOW" })).rejects.toThrow("Invalid CHECKPOINT_NOW message");
+    await expect(router.handleMessage({ type: "CHECKPOINT_NOW", sessionId: 123 })).rejects.toThrow("Invalid CHECKPOINT_NOW message");
   });
 
   it("validates and accepts OPEN_HISTORY and DELETE_SESSION", async () => {

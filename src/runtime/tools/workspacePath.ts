@@ -7,12 +7,12 @@ import { ToolExecutionError } from "./toolError";
  * every filesystem tool funnels through here (or `resolveWorkspacePathSafe`,
  * which additionally verifies symlinks) before touching the disk.
  */
-export function resolveWorkspacePath(workspacePath: string, requestedPath = "."): string {
-  const root = path.resolve(workspacePath);
+export function resolveWorkspacePath(workspacePath: string, requestedPath = ".", pathMod: typeof path.win32 | typeof path.posix = path): string {
+  const root = pathMod.resolve(workspacePath);
   const cleaned = requestedPath.trim().replace(/^['"]|['"]$/g, "");
-  const normalized = path.normalize(cleaned.length > 0 ? cleaned : ".");
-  const target = path.isAbsolute(normalized) ? normalized : path.resolve(root, normalized);
-  if (!isInsideWorkspace(root, target)) {
+  const normalized = pathMod.normalize(cleaned.length > 0 ? cleaned : ".");
+  const target = pathMod.isAbsolute(normalized) ? normalized : pathMod.resolve(root, normalized);
+  if (!isInsideWorkspace(root, target, pathMod)) {
     throw new ToolExecutionError("workspace_violation", `Path is outside the workspace: ${requestedPath}`);
   }
   return target;
@@ -28,13 +28,13 @@ export function resolveWorkspacePath(workspacePath: string, requestedPath = ".")
  * If neither path can be resolved on disk the lexical decision stands: the
  * filesystem call itself will fail with a normal, mapped error.
  */
-export async function resolveWorkspacePathSafe(workspacePath: string, requestedPath = "."): Promise<string> {
-  const target = resolveWorkspacePath(workspacePath, requestedPath);
+export async function resolveWorkspacePathSafe(workspacePath: string, requestedPath = ".", pathMod: typeof path.win32 | typeof path.posix = path): Promise<string> {
+  const target = resolveWorkspacePath(workspacePath, requestedPath, pathMod);
   const [rootReal, targetReal] = await Promise.all([
     realpathOfExisting(workspacePath),
     realpathOfExisting(target),
   ]);
-  if (rootReal && targetReal && !isInsideWorkspace(rootReal, targetReal)) {
+  if (rootReal && targetReal && !isInsideWorkspace(rootReal, targetReal, pathMod)) {
     throw new ToolExecutionError(
       "workspace_violation",
       `Path escapes the workspace through a link: ${requestedPath}`,
@@ -43,11 +43,11 @@ export async function resolveWorkspacePathSafe(workspacePath: string, requestedP
   return target;
 }
 
-export function isInsideWorkspace(workspacePath: string, targetPath: string): boolean {
-  const root = path.resolve(workspacePath);
-  const target = path.resolve(targetPath);
-  const relative = path.relative(root, target);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+export function isInsideWorkspace(a: string, b: string, pathMod: typeof path.win32 | typeof path.posix = path): boolean {
+  const root = pathMod.resolve(a);
+  const target = pathMod.resolve(b);
+  const relative = pathMod.relative(root, target);
+  return relative === "" || (!relative.startsWith("..") && !pathMod.isAbsolute(relative));
 }
 
 /** Workspace-relative POSIX path (stable, model-facing, never absolute). */

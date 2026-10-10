@@ -157,6 +157,7 @@ postToHost({ type: "GET_RUNTIME_STATUS" });
 postToHost({ type: "LIST_SESSIONS" });
 postToHost({ type: "GET_PERMISSION_RULES" });
 postToHost({ type: "GET_EXTENSION_INFO" });
+postToHost({ type: "GET_SKILLS" });
 render();
 
 /**
@@ -254,6 +255,11 @@ function handleHostMessage(message: HostToGui): void {
       break;
     case "SHOW_SETTINGS":
       state.view = "settings";
+      break;
+    case "SKILLS_UPDATED":
+      state.skills = message.skills;
+      state.skillConflicts = message.conflicts;
+      state.skillsLoading = false;
       break;
     case "SESSION_UPDATED":
       applySessionUpdate(message.sessions, message.activeSessionId);
@@ -365,7 +371,7 @@ function handleHostMessage(message: HostToGui): void {
       // Turn boundary: the upsert below flushes and settles any streamed
       // assistant text before the tool block.
       const toolCall = message.toolCall;
-      if (toolCall.toolName === "run_command" && toolCall.command) {
+      if ((toolCall.toolName === "run_command" || toolCall.toolName === "run_skill_script") && toolCall.command) {
         messageList.upsertCommandLine({ command: toolCall.command, running: true, toolCallId: toolCall.toolCallId });
       } else {
         messageList.upsertToolLine({
@@ -381,7 +387,7 @@ function handleHostMessage(message: HostToGui): void {
     }
     case "AGENT_TOOL_RESULT": {
       const key = message.result.toolCallId ?? `tool:${message.result.toolName}`;
-      const isCommand = message.result.toolName === "run_command";
+      const isCommand = message.result.toolName === "run_command" || message.result.toolName === "run_skill_script";
       if (isCommand) {
         // The command box already exists from AGENT_TOOL_CALL; flip its state
         // in place. AGENT_COMMAND_OUTPUT (which arrives first, with the exit
@@ -772,6 +778,11 @@ function renderSettingsViewGuarded(): void {
     shield: [state.autoApproveEnabled, state.autoApproveScope],
     rules: state.permissionRules,
     info: state.extensionInfo,
+    skills: state.skills.map((s) => [s.name, s.enabled]),
+    skillsCount: state.skills.length,
+    skillConflictsCount: state.skillConflicts.length,
+    skillsLoading: state.skillsLoading,
+    skillsFilter: state.skillsFilter,
   });
   if (fingerprint === lastSettingsFingerprint) {
     return;
@@ -846,6 +857,18 @@ function renderSettingsViewGuarded(): void {
       },
       onToggleAutoApprove: toggleAutoApprove,
       onSetPermissionRule: setPermissionRule,
+      onToggleSkill: (skillName: string) => {
+        postToHost({ type: "TOGGLE_SKILL", skillName });
+      },
+      onReloadSkills: () => {
+        state.skillsLoading = true;
+        postToHost({ type: "RELOAD_SKILLS" });
+        render();
+      },
+      onSkillsSearch: (query: string) => {
+        state.skillsFilter = query;
+        render();
+      },
     });
   if (insideSettings && focusId !== undefined) {
     const restored = providerSettings.querySelector<HTMLElement>(`#${CSS.escape(focusId)}`);

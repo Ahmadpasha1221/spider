@@ -191,6 +191,11 @@ export interface RuntimeSendRequest {
    */
   readonly rulesContext?: string;
   /**
+   * Formatted agent skills catalog prompt (see `src/runtime/skills/skillPrompt.ts`).
+   * Injected into the system prompt so the model knows which skills are available to load.
+   */
+  readonly skillsCatalogPrompt?: string;
+  /**
    * Full system-prompt override for a nested run (subagents). When set it
    * replaces the default Spider prompt; the fallback tool contract is still
    * appended for providers without native tool calling.

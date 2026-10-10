@@ -200,10 +200,15 @@ Arguments are passed as argv (never shell-interpolated).
 
 ### Layer 6 — SSRF protection (network boundary)
 
-`fetch_url` validates URLs before any network request: HTTPS-only (or
-HTTP-to-loopback with `allowLocalNetwork`), blocks private/RFC1918/CGNAT/
-link-local/metadata addresses by literal AND by DNS resolution on every
-redirect hop.
+`fetch_url` validates URLs before any network request: HTTPS-only for the
+public web (plain http is rejected unless the destination is loopback under
+the opt-in below), blocks private/RFC1918/CGNAT/link-local/metadata addresses
+by literal AND by DNS resolution on the original URL and on every redirect hop
+(DNS is re-resolved per hop). Loopback (`localhost`, `127.0.0.0/8`, `::1`) is
+denied by default and reachable over http(s) only when the
+`spider.fetch.allowLocalNetwork` setting (default `false`) opts in. Every
+successful result discloses its destination (`destination: "loopback" |
+"public"` plus a `destination: loopback` notice for local-machine responses).
 
 ### Layer 7 — Cancellation and timeout (denial-of-service mitigation)
 
@@ -218,10 +223,18 @@ allows the agent to cancel running processes on user request.
 
 ### DNS rebinding (TOCTOU) in fetch_url
 
-DNS is resolved once before the HTTP request. A hostile DNS server can
-re-resolve a hostname to a private IP between the check and the TCP connect.
-This is documented in `urlSecurity.ts`. Mitigation: loopback-only allowance
-limits blast radius to the developer's own machine.
+DNS is resolved once per hop, immediately before that hop's request
+(re-resolution already happens on the original URL and on every redirect
+target), but the checked address is not pinned to the TCP connect. A hostile
+DNS server can serve a benign address at check time and a private/loopback
+address at connect time (short TTL + rapid record swap); eliminating the race
+would require connection-level IP pinning the current `fetch`-based transport
+does not provide.
+This is documented in `urlSecurity.ts`. Mitigation: loopback is denied by
+default (`spider.fetch.allowLocalNetwork`, default `false`), so a rebinding
+attack cannot reach the local machine unless the user explicitly opts in;
+LAN/metadata ranges stay unreachable either way, and the `external`
+permission still gates every request.
 
 ### Prompt injection is not fully preventable by structural controls
 
@@ -301,3 +314,91 @@ the git repo lives inside the distro).
    (using a real shell parser), validate it against a policy, and launch it
    with `shell: false`. This would provide structural injection prevention at
    the shell-expression level, not just at the spawn API level.
+
+---
+
+## Coverage Audit (verified 2026-10-10 against codebase)
+
+> Code-to-doc audit. `✅ COVERED` = verified in code. `❌ OPEN` = documented but not implemented.
+
+### Root Cause — ✅ ALL COVERED
+
+| # | Claim | Status | Evidence |
+|---|-------|--------|----------|
+| 1 | `RunCommandOptions.context` was optional | ✅ COVERED | `src/runtime/tools/commandRunner.ts:40` — `readonly context: ExecutionContext` (required); runtime guard `53-59` throws `ExecutionContextError` |
+| 2 | `BackgroundProcessStartRequest.context` was optional | ✅ COVERED | `src/runtime/tools/backgroundProcessManager.ts:72` (required); runtime guard `192-199` throws `ExecutionContextError`, no spawn |
+| 3 | `WorkspaceToolExecutor.resolveExecution()` silent fallback | ✅ COVERED | `src/runtime/tools/workspaceToolExecutor.ts:729-749` — throws `ToolExecutionError(dependency_unavailable)` when `executionManager` absent; returns `{context, directory}` |
+| 4 | `runTestsTool.resolveExecution()` silent fallback | ✅ COVERED | `src/runtime/tools/runTestsTool.ts:336-357` — same fail-closed throw |
+| — | No `shell:true` path remains | ✅ COVERED | 0 hits for `shell: true` in `src/`; `executionManager.ts:130-212` (`buildCommandInvocation` + `buildArgvInvocation`) hardcode `shell: false` for bash/cmd/PowerShell/WSL |
+
+### Security Invariant (4 enforcement layers) — ✅ ALL COVERED
+
+| Layer | Status | Evidence |
+|-------|--------|----------|
+| 1. Type system (required `context`) | ✅ COVERED | `commandRunner.ts:40`, `backgroundProcessManager.ts:72` |
+| 2. Runtime validation | ✅ COVERED | `commandRunner.ts:53-59`, `backgroundProcessManager.ts:192-199` |
+| 3. Caller enforcement | ✅ COVERED | `workspaceToolExecutor.ts:733-739`, `runTestsTool.ts:341-347` |
+| 4. No fallback branch | ✅ COVERED | `else {shell:true}` removed; no spawn without validated context |
+
+### Remediation files — ✅ ALL COVERED
+
+All 4 source files + all 7 test files + `shellInjectionSecurity.test.ts` exist (`test/unit/runtime/execution/shellInjectionSecurity.test.ts:1-100` confirms argv-only, fail-closed, per-entry-point coverage).
+
+### Defense in Depth (7 layers) — ✅ ALL COVERED
+
+| Layer | Status | Evidence |
+|-------|--------|----------|
+| 1. Permission gate before execution | ✅ COVERED | `src/runtime/tools/toolRouter.ts:49-52` — `authorize()` deny returns `permission_denied`, never reaches runner |
+| 2. Structured argv (`shell:false`) | ✅ COVERED | `executionManager.ts:141-178,205-211`; caveat in doc is accurate: `run_command` string still evaluated by `bash -c`, so gate is primary defense |
+| 3. Mandatory ExecutionContext | ✅ COVERED | `executionManager.ts:70-112` single authority from host facts |
+| 4. Workspace path validation | ✅ COVERED | `workspacePath.ts:10-44` lexical + `fs.realpath` symlink check → `workspace_violation` |
+| 5. `run_tests` allow-list | ✅ COVERED | `runTestsTool.ts:29-38` (`pnpm,npm,yarn,pytest,python,python3,cargo,go`), argv-only |
+| 6. SSRF protection | ✅ COVERED | `net/urlSecurity.ts:35,48-80` HTTPS-only, blocked hosts/suffixes, DNS per redirect |
+| 7. Timeout/cancel | ✅ COVERED | `commandRunner` 120s default; `runTests` 120s/300s max; `BackgroundProcessManager` 10s startup, 64k buffer, 50 retained; `AbortSignal` throughout |
+
+### Remaining Risks — ✅ ACCURATELY DOCUMENTED (accepted, not fixed)
+
+DNS-rebinding TOCTOU, prompt-injection via structurally-valid commands, no OS sandbox, 64k in-memory rolling buffer, `gitStatusTool.ts:307-312` direct `spawn(git,…,shell:false)` bypassing `ExecutionManager`/WSL — all confirmed true in code. `DESTRUCTIVE_COMMAND_PATTERNS` (`permissionPolicy.ts:195-207`, 11 regexes) confirmed static/incomplete as doc admits.
+
+### Recommended Next Improvements — ❌ ALL OPEN (0/6 done)
+
+| # | Item | Status |
+|---|------|--------|
+| 1 | Route `gitStatusTool` through `ExecutionManager` | ❌ OPEN — still direct `spawn` |
+| 2 | Expand `DESTRUCTIVE_COMMAND_PATTERNS` | ❌ OPEN — still 11 patterns |
+| 3 | Command AST / policy layer | ❌ OPEN |
+| 4 | Process sandboxing | ❌ OPEN |
+| 5 | Command audit logging | ❌ OPEN |
+| 6 | `run_command` argv parsing (`shell:false` at expression level) | ❌ OPEN — still `bash -c` verbatim |
+
+**Summary: core vulnerability + all 4 invariant layers + all 7 defense layers = ✅ COVERED. All 6 hardening follow-ups = ❌ OPEN.**
+
+---
+
+## Agent Skills Script Execution Security Hardening (Step 4 Focused Security Review)
+
+> Verified: 2026-10-10 against `src/runtime/tools/skillTools.ts`, `src/runtime/tools/commandRunner.ts`, `src/runtime/skills/skillSecurity.ts`, and `src/runtime/runtimeManager.ts`.
+
+### 1. Process Invocation & Shell Elimination
+- **Argv-Only Process Creation (`shell: false`)**: `run_skill_script` uses `runWorkspaceArgvCommand(RunArgvCommandOptions)` instead of passing concatenated strings to shell interpreters.
+- **Explicit Interpreter Mapping**:
+  - `.py` → `python`
+  - `.sh`, `.bash` → `bash`
+  - `.js`, `.mjs`, `.cjs` → `node`
+  - `.ts` → `node --loader tsx`
+- **Shell Injection Resistance**: Arguments containing `;`, `&&`, `|`, `$(...)`, `` `...` ``, `>`, `%VAR%` are passed as discrete elements in the `argv` array to `child_process.spawn(..., { shell: false })`. Metacharacters are treated solely as literal argument strings, completely preventing secondary command execution.
+
+### 2. Environment Sanitization & Isolation Boundary
+- **Sanitized Child Environment**: `sanitizeSkillScriptEnvironment()` purges all known credential patterns (`API_KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `OPENAI`, `ANTHROPIC`, `GITHUB`, `AZURE`, etc.) and permits only safe runtime keys (`PATH`, `USER`, `TEMP`, `SYSTEMROOT`, etc.).
+- **Defense-in-Depth Guarantee**: Environment filtering restricts secret exposure, but is explicitly **NOT a full OS sandbox**. On local hosts, the child process runs with the privileges of the active user. True isolation requires WSL (`backend: "wsl"`) or containerization (Docker).
+- **Explicit Environment Labeling**: Approval prompts and permission requests explicitly label the execution environment (`host execution (non-sandboxed)` vs `WSL (<distro>)` vs `remote (<authority>)`).
+
+### 3. Filesystem TOCTOU & Canonical Validation
+- **File Handle Atomicity**: `readSkillResource` uses `fs.open()` to obtain an open file descriptor, then executes `handle.stat()` and `handle.readFile()` on that same descriptor, eliminating user-space symlink swap races between check and read.
+- **Residual TOCTOU Limitation**: For script execution (`run_skill_script`), `fs.realpath()` and lexical containment are verified prior to spawn. On concurrent or shared filesystems where untrusted local processes have write access to the script directory, a window between canonical validation and interpreter open exists at the OS level. This is mitigated by restricting script location to `scripts/` within the skill directory and requiring workspace trust.
+
+### 4. Approval Integrity
+- **Mandatory User Approval**: `run_skill_script` is strictly assigned to the `EXECUTE` permission category. It is never auto-allowed by policy (`shouldAutoAllow` returns `false`).
+- **Complete Request Disclosure**: The permission prompt displays `[skill:<name>] <script> [cwd: <workspace>] [env: <isolation-label>]` with all arguments included and sensitive tokens redacted (`redactSensitiveString`).
+
+

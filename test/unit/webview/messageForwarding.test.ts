@@ -12,7 +12,7 @@ describe("host reply forwarding allowlist", () => {
   });
 
   it("forwards the other asynchronous replies the GUI waits on", () => {
-    for (const type of ["TRANSCRIPT", "TODO_UPDATED", "AUTH_STATUS", "RUNTIME_STATUS", "LOCAL_MODELS", "OPENROUTER_MODELS", "USER_QUESTION_CLOSED"] as const) {
+    for (const type of ["TRANSCRIPT", "TODO_UPDATED", "AUTH_STATUS", "RUNTIME_STATUS", "LOCAL_MODELS", "OPENROUTER_MODELS", "USER_QUESTION_CLOSED", "SKILLS_UPDATED"] as const) {
       expect(shouldForwardResult(type)).toBe(true);
     }
   });

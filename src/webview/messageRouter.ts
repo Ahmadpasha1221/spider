@@ -13,6 +13,7 @@ import type { PermissionManager } from "../permissions/permissionManager";
 import { isPermissionRule, isPermissionRuleCategory } from "./permissionRules";
 import { EXTENSION_VERSION } from "../shared/constants";
 import { SECRET_KEYS } from "../shared/storageKeys";
+import type { SkillRegistry } from "../runtime/skills/skillRegistry";
 import {
   AgentState,
   ExtensionMessage,
@@ -20,6 +21,8 @@ import {
   GuiRuntimeProvider,
   LocalProvider,
   ModelOption,
+  SkillConflictView,
+  SkillItemView,
   TodoItemView,
   WebviewMessage,
 } from "./types";
@@ -182,6 +185,18 @@ export class MessageRouter {
         const items = this.runtimeManager?.listCheckpoints(typed.sessionId) ?? [];
         return { type: "CHECKPOINTS", sessionId: typed.sessionId, items } as ExtensionMessage;
       }
+      case "CHECKPOINT_NOW": {
+        if (!this.runtimeManager) {
+          throw new Error("Invalid CHECKPOINT_NOW message: runtime is not configured.");
+        }
+        if (typeof typed.sessionId !== "string") {
+          throw new Error("Invalid CHECKPOINT_NOW message: expected a sessionId string.");
+        }
+        const rawLabel = (typed as { label?: unknown }).label;
+        const label = typeof rawLabel === "string" && rawLabel.trim().length > 0 ? rawLabel : "Manual checkpoint";
+        const items = await this.runtimeManager.createCheckpoint(typed.sessionId, label);
+        return { type: "CHECKPOINTS", sessionId: typed.sessionId, items } as ExtensionMessage;
+      }
       case "RESTORE_CHECKPOINT": {
         const restored = await this.runtimeManager?.restoreCheckpoint(typed.checkpointId);
         return {
@@ -321,6 +336,12 @@ export class MessageRouter {
         return this.selectLocalModel(typed.modelId);
       case "USE_MOCK_RUNTIME":
         return this.useMockRuntime();
+      case "GET_SKILLS":
+        return this.getSkillsView();
+      case "TOGGLE_SKILL":
+        return this.toggleSkillView(typed.skillName);
+      case "RELOAD_SKILLS":
+        return this.reloadSkillsView();
       default: {
         const _exhaustive: never = typed;
         return _exhaustive;
@@ -710,6 +731,60 @@ export class MessageRouter {
     };
   }
 
+  private toSkillsUpdatedMessage(registry: SkillRegistry): ExtensionMessage {
+    const manifests = registry.listSkills({ includeDisabled: true });
+    const skills: SkillItemView[] = manifests.map((m) => ({
+      name: m.name,
+      description: m.description,
+      scope: m.scope,
+      enabled: m.enabled,
+      resourceCount: m.resources.length,
+      scriptCount: m.scripts.length,
+      skillDir: m.skillDir,
+      ...(m.frontmatter.license ? { license: m.frontmatter.license } : {}),
+      ...(m.frontmatter.compatibility ? { compatibility: m.frontmatter.compatibility } : {}),
+    }));
+    const conflicts: SkillConflictView[] = registry.getConflicts().map((c) => ({
+      skillName: c.skillName,
+      activeScope: c.active.scope,
+      activeDir: c.active.skillDir,
+      shadowedScope: c.shadowed.scope,
+      shadowedDir: c.shadowed.skillDir,
+      reason: c.reason,
+    }));
+    return { type: "SKILLS_UPDATED", skills, conflicts };
+  }
+
+  private async getSkillsView(): Promise<ExtensionMessage> {
+    if (!this.runtimeManager) {
+      return { type: "SKILLS_UPDATED", skills: [], conflicts: [] };
+    }
+    const wsPath = this.runtimeManager.activeSession?.workspacePath ?? this.defaultWorkspacePath;
+    const registry = this.runtimeManager.getSkillRegistry(wsPath);
+    await registry.discoverSkills();
+    return this.toSkillsUpdatedMessage(registry);
+  }
+
+  private toggleSkillView(skillName: string): ExtensionMessage {
+    if (!this.runtimeManager) {
+      return { type: "SKILLS_UPDATED", skills: [], conflicts: [] };
+    }
+    const wsPath = this.runtimeManager.activeSession?.workspacePath ?? this.defaultWorkspacePath;
+    const registry = this.runtimeManager.getSkillRegistry(wsPath);
+    registry.toggleSkill(skillName);
+    return this.toSkillsUpdatedMessage(registry);
+  }
+
+  private async reloadSkillsView(): Promise<ExtensionMessage> {
+    if (!this.runtimeManager) {
+      return { type: "SKILLS_UPDATED", skills: [], conflicts: [] };
+    }
+    const wsPath = this.runtimeManager.activeSession?.workspacePath ?? this.defaultWorkspacePath;
+    const registry = this.runtimeManager.getSkillRegistry(wsPath);
+    await registry.discoverSkills({ forceRefresh: true });
+    return this.toSkillsUpdatedMessage(registry);
+  }
+
   private validate(message: unknown): WebviewMessage {
     if (typeof message !== "object" || message === null) {
       throw new Error("Invalid message shape");
@@ -752,6 +827,14 @@ export class MessageRouter {
       case "GET_CHECKPOINTS":
         if (typeof typed.sessionId !== "string") {
           throw new Error("Invalid GET_CHECKPOINTS message");
+        }
+        return message as WebviewMessage;
+      case "CHECKPOINT_NOW":
+        if (typeof typed.sessionId !== "string") {
+          throw new Error("Invalid CHECKPOINT_NOW message");
+        }
+        if (typed.label !== undefined && typeof typed.label !== "string") {
+          throw new Error("Invalid CHECKPOINT_NOW message");
         }
         return message as WebviewMessage;
       case "RESTORE_CHECKPOINT":
@@ -873,6 +956,14 @@ export class MessageRouter {
           throw new Error("Invalid SELECT_LOCAL_MODEL message");
         }
         return message as WebviewMessage;
+      case "GET_SKILLS":
+      case "RELOAD_SKILLS":
+        return message as WebviewMessage;
+      case "TOGGLE_SKILL":
+        if (typeof typed.skillName !== "string" || typed.skillName.trim().length === 0) {
+          throw new Error("Invalid TOGGLE_SKILL message");
+        }
+        return message as WebviewMessage;
       default: {
         throw new Error(`Unknown message type: ${type}`);
       }
@@ -988,8 +1079,16 @@ function toAgentState(status: string): AgentState {
 }
 
 function commandFromInput(input: unknown): string | undefined {
-  if (typeof input === "object" && input !== null && "command" in input && typeof (input as { command: unknown }).command === "string") {
-    return (input as { command: string }).command;
+  if (typeof input === "object" && input !== null) {
+    const record = input as Record<string, unknown>;
+    if (typeof record.command === "string") {
+      return record.command;
+    }
+    if (typeof record.script === "string") {
+      const name = typeof record.name === "string" ? record.name : "skill";
+      const args = Array.isArray(record.args) && record.args.length > 0 ? " " + record.args.join(" ") : "";
+      return `[skill:${name}] ${record.script}${args}`;
+    }
   }
   return undefined;
 }
@@ -1000,10 +1099,16 @@ function pathFromInput(input: unknown): string | undefined {
   }
   const record = input as Record<string, unknown>;
   if (typeof record.path === "string") {
+    if (typeof record.name === "string") {
+      return `${record.name}:${record.path}`;
+    }
     return record.path;
   }
   if (typeof record.file_path === "string") {
     return record.file_path;
+  }
+  if (typeof record.name === "string") {
+    return record.name;
   }
   return undefined;
 }

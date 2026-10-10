@@ -21,10 +21,17 @@ async function reason(fn: () => Promise<unknown>): Promise<string> {
 }
 
 describe("local network policy", () => {
-  it("keeps the default policy strict: http rejected at parse, loopback blocked", async () => {
+  it("denies loopback by default (opt-in via allowLocalNetwork), including DNS-resolved loopback", async () => {
     expect(() => parseFetchUrl("http://localhost:3000")).toThrowError(UrlSecurityError);
     await expect(reason(() => assertFetchableUrl(new URL("https://localhost"), loopbackResolver, {}))).resolves.toBe(
       "blocked_host",
+    );
+    await expect(reason(() => assertFetchableUrl(new URL("https://127.0.0.1"), loopbackResolver, {}))).resolves.toBe(
+      "blocked_address",
+    );
+    // A public name resolving to loopback is also denied by default.
+    await expect(reason(() => assertFetchableUrl(new URL("https://example.com"), loopbackResolver, {}))).resolves.toBe(
+      "blocked_address",
     );
   });
 
@@ -64,6 +71,23 @@ describe("local network policy", () => {
     expect(await reason(() => assertFetchableUrl(new URL("https://example.com/"), publicResolver, policy))).toBe(
       "allowed",
     );
+  });
+
+  it("re-checks every redirect hop, so a benign first hop cannot smuggle a later private hop", async () => {
+    // Each hop is resolved independently: a hostname that is benign on hop 1
+    // and rewrites to a private address on hop 2 (DNS rebinding) is caught
+    // when the redirect target is validated.
+    const hopResolvers = new Map<string, readonly string[]>([
+      ["start.example.com", ["93.184.216.34"]],
+      ["rebound.example.com", ["10.0.0.5"]],
+    ]);
+    const hoppingResolver = async (hostname: string): Promise<readonly string[]> => hopResolvers.get(hostname) ?? [];
+    await expect(
+      reason(() => assertFetchableUrl(new URL("https://start.example.com/"), hoppingResolver, {})),
+    ).resolves.toBe("allowed");
+    await expect(
+      reason(() => assertFetchableUrl(new URL("https://rebound.example.com/"), hoppingResolver, {})),
+    ).resolves.toBe("blocked_address");
   });
 
   it("classifies loopback hosts and addresses", () => {
