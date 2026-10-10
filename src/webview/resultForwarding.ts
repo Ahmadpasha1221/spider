@@ -18,5 +18,6 @@ export function shouldForwardResult(type: ExtensionMessage["type"]): boolean {
     || type === "TODO_UPDATED"
     || type === "CHECKPOINTS"
     || type === "USER_QUESTION_CLOSED"
+    || type === "SKILLS_UPDATED"
   );
 }

@@ -117,6 +117,11 @@
           "type": "boolean",
           "default": true,
           "description": "Load .spiderrules files from the workspace and inject them as project instructions in the agent's system prompt. Nested rules apply under their directory; root rules apply everywhere."
+        },
+        "spider.fetch.allowLocalNetwork": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow fetch_url to reach loopback destinations (localhost, 127.0.0.0/8, ::1) over http(s) for local dev servers. Default false (loopback blocked). LAN, link-local, and cloud metadata targets stay blocked regardless."
         }
       }
     },

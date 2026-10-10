@@ -52,6 +52,10 @@ describe("tool availability (current available-tool set)", () => {
       "get_problems",
       "run_tests",
       "run_subagent",
+      "list_skills",
+      "load_skill",
+      "read_skill_resource",
+      "run_skill_script",
       "finish",
     ]);
   });

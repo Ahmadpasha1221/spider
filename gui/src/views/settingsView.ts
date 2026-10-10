@@ -19,11 +19,15 @@ export type SettingsHandlers = {
   onSelectSection: (section: SettingsSection) => void;
   onToggleAutoApprove: (enabled: boolean) => void;
   onSetPermissionRule: (category: PermissionRuleCategory, rule: PermissionRule) => void;
+  onToggleSkill: (skillName: string) => void;
+  onReloadSkills: () => void;
+  onSkillsSearch: (query: string) => void;
 };
 
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string }> = [
   { id: "models", label: "Models" },
   { id: "behaviour", label: "Agent Behaviour" },
+  { id: "skills", label: "Agent Skills" },
   { id: "autoApprove", label: "Auto Approve" },
   { id: "indexing", label: "Indexing" },
   { id: "about", label: "About Spider" },
@@ -65,6 +69,9 @@ export function renderSettingsView(
       break;
     case "behaviour":
       renderBehaviourSection(content);
+      break;
+    case "skills":
+      renderSkillsSection(content, state, handlers);
       break;
     case "autoApprove":
       renderAutoApproveSection(content, state, handlers);
@@ -314,4 +321,175 @@ function renderAboutSection(root: HTMLElement, state: AppState): void {
 
   card.append(logo, name, details, links, credits);
   root.appendChild(card);
+}
+
+function renderSkillsSection(
+  root: HTMLElement,
+  state: AppState,
+  handlers: SettingsHandlers,
+): void {
+  const heading = document.createElement("h2");
+  heading.textContent = "Agent Skills";
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent =
+    "Reusable capabilities loaded into context on demand from workspace (.spider/skills, .agentskills), user global (~/.agentskills), and bundled skill sets.";
+  root.append(heading, hint);
+
+  if (state.skillConflicts.length > 0) {
+    const alert = document.createElement("div");
+    alert.className = "skills-conflict-notice";
+    alert.setAttribute("role", "alert");
+
+    const alertTitle = document.createElement("div");
+    alertTitle.className = "skills-conflict-title";
+    alertTitle.textContent = `⚠️ Skill Precedence Conflicts (${state.skillConflicts.length})`;
+    alert.appendChild(alertTitle);
+
+    const conflictList = document.createElement("ul");
+    conflictList.className = "skills-conflict-list";
+    for (const conflict of state.skillConflicts) {
+      const item = document.createElement("li");
+      item.className = "skills-conflict-item";
+      item.textContent = `"${conflict.skillName}": Active in ${conflict.activeScope} (${conflict.activeDir}), shadowed in ${conflict.shadowedScope} (${conflict.shadowedDir}). ${conflict.reason}`;
+      conflictList.appendChild(item);
+    }
+    alert.appendChild(conflictList);
+    root.appendChild(alert);
+  }
+
+  const toolbar = document.createElement("div");
+  toolbar.className = "skills-toolbar";
+
+  const search = document.createElement("input");
+  search.type = "search";
+  search.id = "skills-search-filter";
+  search.className = "input skills-search-input";
+  search.placeholder = "Search skills by name, description, or scope...";
+  search.value = state.skillsFilter;
+  search.addEventListener("input", (e) => {
+    handlers.onSkillsSearch((e.target as HTMLInputElement).value);
+  });
+  toolbar.appendChild(search);
+
+  const reloadBtn = document.createElement("button");
+  reloadBtn.type = "button";
+  reloadBtn.className = "btn btn-secondary btn-small skills-reload-btn";
+  reloadBtn.textContent = state.skillsLoading ? "Scanning..." : "Reload Skills";
+  reloadBtn.disabled = state.skillsLoading;
+  reloadBtn.addEventListener("click", () => {
+    handlers.onReloadSkills();
+  });
+  toolbar.appendChild(reloadBtn);
+
+  root.appendChild(toolbar);
+
+  const query = state.skillsFilter.trim().toLowerCase();
+  const filtered = state.skills.filter((s) => {
+    if (!query) return true;
+    return (
+      s.name.toLowerCase().includes(query) ||
+      s.description.toLowerCase().includes(query) ||
+      s.scope.toLowerCase().includes(query)
+    );
+  });
+
+  const listContainer = document.createElement("div");
+  listContainer.className = "skills-list";
+
+  if (state.skills.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "hint skills-empty";
+    empty.textContent = state.skillsLoading
+      ? "Discovering agent skills..."
+      : "No agent skills discovered. Add a SKILL.md in .spider/skills/ or ~/.agentskills/";
+    listContainer.appendChild(empty);
+  } else if (filtered.length === 0) {
+    const noMatch = document.createElement("p");
+    noMatch.className = "hint skills-empty";
+    noMatch.textContent = `No skills match "${state.skillsFilter}".`;
+    listContainer.appendChild(noMatch);
+  } else {
+    for (const skill of filtered) {
+      const card = document.createElement("div");
+      card.className = "skill-card " + (skill.enabled ? "is-enabled" : "is-disabled");
+
+      const header = document.createElement("div");
+      header.className = "skill-card-header";
+
+      const titleGroup = document.createElement("div");
+      titleGroup.className = "skill-title-group";
+
+      const name = document.createElement("strong");
+      name.className = "skill-name";
+      name.textContent = skill.name;
+      titleGroup.appendChild(name);
+
+      const scopeBadge = document.createElement("span");
+      scopeBadge.className = `skill-scope-badge scope-${skill.scope}`;
+      scopeBadge.textContent = skill.scope;
+      titleGroup.appendChild(scopeBadge);
+
+      if (skill.resourceCount > 0) {
+        const resPill = document.createElement("span");
+        resPill.className = "skill-pill";
+        resPill.textContent = `${skill.resourceCount} resource${skill.resourceCount === 1 ? "" : "s"}`;
+        titleGroup.appendChild(resPill);
+      }
+
+      if (skill.scriptCount > 0) {
+        const scriptPill = document.createElement("span");
+        scriptPill.className = "skill-pill";
+        scriptPill.textContent = `${skill.scriptCount} script${skill.scriptCount === 1 ? "" : "s"}`;
+        titleGroup.appendChild(scriptPill);
+      }
+
+      header.appendChild(titleGroup);
+
+      const toggleBtn = document.createElement("button");
+      toggleBtn.type = "button";
+      toggleBtn.className = "btn btn-small " + (skill.enabled ? "btn-secondary" : "btn-primary") + " skill-toggle-btn";
+      toggleBtn.textContent = skill.enabled ? "Disable" : "Enable";
+      toggleBtn.setAttribute("aria-label", `${skill.enabled ? "Disable" : "Enable"} ${skill.name}`);
+      toggleBtn.addEventListener("click", () => {
+        handlers.onToggleSkill(skill.name);
+      });
+      header.appendChild(toggleBtn);
+
+      card.appendChild(header);
+
+      const desc = document.createElement("p");
+      desc.className = "skill-description";
+      desc.textContent = skill.description;
+      card.appendChild(desc);
+
+      const meta = document.createElement("div");
+      meta.className = "skill-meta";
+
+      const pathSpan = document.createElement("span");
+      pathSpan.className = "skill-path";
+      pathSpan.title = skill.skillDir;
+      pathSpan.textContent = skill.skillDir;
+      meta.appendChild(pathSpan);
+
+      if (skill.license) {
+        const licenseSpan = document.createElement("span");
+        licenseSpan.className = "skill-meta-item";
+        licenseSpan.textContent = `License: ${skill.license}`;
+        meta.appendChild(licenseSpan);
+      }
+
+      if (skill.compatibility) {
+        const compatSpan = document.createElement("span");
+        compatSpan.className = "skill-meta-item";
+        compatSpan.textContent = `Compat: ${skill.compatibility}`;
+        meta.appendChild(compatSpan);
+      }
+
+      card.appendChild(meta);
+      listContainer.appendChild(card);
+    }
+  }
+
+  root.appendChild(listContainer);
 }

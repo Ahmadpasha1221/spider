@@ -1,8 +1,12 @@
 import { lookup } from "node:dns/promises";
+import { isIP } from "node:net";
 import { ToolExecutionError } from "./toolError";
 import { htmlToText } from "./htmlText";
 import {
   assertFetchableUrl,
+  isLoopbackAddress,
+  isLoopbackHostname,
+  normalizeHostname,
   parseFetchUrl,
   UrlSecurityError,
   type HostResolver,
@@ -15,17 +19,32 @@ import {
  * This is deliberately **not** web search and not a browser: no crawling, no
  * JavaScript, no page execution, no caching. Every request is bounded and the
  * target is validated against the SSRF policy (https for the public web;
- * http(s) loopback for local dev servers; private, link-local and metadata
- * addresses blocked, on the original URL *and* on every redirect).
- * Unsupported binary content is reported as metadata instead of being loaded
- * into model context.
+ * private, link-local and metadata addresses blocked, on the original URL
+ * *and* on every redirect).
  *
- * Loopback allowance is safe to default on here because `fetch_url` already
- * requires the `external` permission: the user approves each request, and the
- * policy only decides which destinations are approvable. LAN/metadata ranges
- * stay unreachable no matter what.
+ * Loopback (localhost, 127.0.0.0/8, ::1) is **denied by default**
+ * (`allowLocalNetwork: false`). It becomes reachable over `http:`/`https:`
+ * only when the host opts in via `spider.fetch.allowLocalNetwork`
+ * (local dev servers such as `http://localhost:3000`). The opt-in is plumbed
+ * through `FetchUrlDeps.allowLocalNetwork` (and
+ * `WorkspaceToolExecutorOptions.allowLocalNetwork`, sourced from VS Code
+ * settings in the extension host). Everything else (LAN ranges, link-local,
+ * cloud metadata, DNS that resolves non-loopback) stays blocked exactly as
+ * before. Loopback still requires the tool's `external` permission, so the
+ * user approves the request; the policy only decides what the user *can*
+ * approve.
+ *
+ * Every successful result discloses its destination
+ * (`destination: "loopback" | "public"` plus a user-visible `notice` for
+ * loopback) so model and user can see when the local machine was contacted.
+ *
+ * DNS-rebinding residual: DNS is re-resolved before **every** request hop
+ * (original URL and each redirect target), but the address is still checked
+ * once before the TCP connect (TOCTOU). A hostile DNS server could re-resolve
+ * a hostname between the check and the connect. The default-deny loopback
+ * policy narrows the reachable set; enabling `allowLocalNetwork` re-opens
+ * loopback as a rebinding target on the developer's own machine.
  */
-const LOCAL_NETWORK_POLICY: LocalNetworkPolicy = { allowLocalNetwork: true };
 export interface FetchUrlResult {
   readonly url: string;
   readonly status: number;
@@ -37,6 +56,10 @@ export interface FetchUrlResult {
   readonly bytes?: number;
   readonly reason?: "http_error" | "unsupported_content" | "truncated";
   readonly message?: string;
+  /** Destination class of the final URL — always present on success. */
+  readonly destination?: "loopback" | "public";
+  /** User-visible disclosure, present when destination is loopback. */
+  readonly notice?: string;
 }
 
 export interface FetchUrlToolContext {
@@ -47,6 +70,12 @@ export interface FetchUrlDeps {
   /** Injectable for tests and alternative hosts. */
   readonly fetchFn?: typeof fetch;
   readonly resolveHost?: HostResolver;
+  /**
+   * Opt-in loopback access for local dev servers. Defaults to false
+   * (loopback blocked). The extension host sources this from the
+   * `spider.fetch.allowLocalNetwork` setting.
+   */
+  readonly allowLocalNetwork?: boolean;
 }
 
 export const FETCH_LIMITS = {
@@ -88,10 +117,13 @@ export async function fetchUrl(
     throw new ToolExecutionError("dependency_unavailable", "URL fetching is not available in this host.");
   }
   const resolveHost = deps.resolveHost ?? defaultResolver;
+  const policy: LocalNetworkPolicy = {
+    ...(deps.allowLocalNetwork === true ? { allowLocalNetwork: true as const } : {}),
+  };
   const maxBytes = clampPositive(input.maxBytes, FETCH_LIMITS.defaultMaxBytes, FETCH_LIMITS.maxBytesLimit);
   const timeoutMs = clampPositive(input.timeoutMs, FETCH_LIMITS.defaultTimeoutMs, FETCH_LIMITS.maxTimeoutMs, FETCH_LIMITS.minTimeoutMs);
 
-  let current = mapSecurityError(() => parseFetchUrl(input.url, LOCAL_NETWORK_POLICY));
+  let current = mapSecurityError(() => parseFetchUrl(input.url, policy));
   let redirects = 0;
   let response: Response;
 
@@ -99,7 +131,7 @@ export async function fetchUrl(
     if (context.signal?.aborted) {
       throw new ToolExecutionError("cancelled", "Tool execution was cancelled.");
     }
-    await mapSecurityErrorAsync(() => assertFetchableUrl(current, resolveHost, LOCAL_NETWORK_POLICY));
+    await mapSecurityErrorAsync(() => assertFetchableUrl(current, resolveHost, policy));
 
     const controller = new AbortController();
     const onAbort = (): void => controller.abort();
@@ -135,14 +167,16 @@ export async function fetchUrl(
         throw new ToolExecutionError("invalid_input", `Too many redirects (maximum ${FETCH_LIMITS.maxRedirects}).`);
       }
       // Validate the redirect target before following it — a public URL must
-      // not be able to bounce the agent onto a private address.
-      current = mapSecurityError(() => parseFetchUrl(new URL(location, current).href, LOCAL_NETWORK_POLICY));
+      // not be able to bounce the agent onto a private address. DNS is
+      // re-resolved on the next loop iteration, so every hop is checked.
+      current = mapSecurityError(() => parseFetchUrl(new URL(location, current).href, policy));
       continue;
     }
     break;
   }
 
   const contentType = baseContentType(response.headers.get("content-type"));
+  const disclosure = await describeDestination(current, resolveHost);
 
   if (response.status >= 400) {
     return {
@@ -153,6 +187,7 @@ export async function fetchUrl(
       ...(redirects > 0 ? { redirects } : {}),
       reason: "http_error",
       message: `The server returned HTTP ${response.status}.`,
+      ...disclosure,
     };
   }
 
@@ -166,6 +201,7 @@ export async function fetchUrl(
       ...(redirects > 0 ? { redirects } : {}),
       reason: "unsupported_content",
       message: `Content type "${contentType || "unknown"}" is not text and was not downloaded.`,
+      ...disclosure,
     };
   }
 
@@ -185,11 +221,52 @@ export async function fetchUrl(
     ...(redirects > 0 ? { redirects } : {}),
     bytes: read.bytes,
     ...(truncated ? { truncated: true as const, reason: "truncated" as const } : {}),
+    ...disclosure,
   };
 }
 
 function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+/**
+ * Classifies the final URL for the user-visible destination disclosure.
+ * Loopback literals/hostnames short-circuit without DNS; named hosts are
+ * re-resolved (best-effort — a resolution failure falls back to "public"
+ * because the pre-request policy check already passed).
+ */
+async function describeDestination(
+  url: URL,
+  resolveHost: HostResolver,
+): Promise<Pick<FetchUrlResult, "destination" | "notice">> {
+  const host = normalizeHostname(url.hostname);
+  if (isIP(host) !== 0) {
+    if (isLoopbackAddress(host)) {
+      return {
+        destination: "loopback",
+        notice: "destination: loopback — this response came from the local machine (localhost/loopback).",
+      };
+    }
+    return { destination: "public" };
+  }
+  if (isLoopbackHostname(host)) {
+    return {
+      destination: "loopback",
+      notice: "destination: loopback — this response came from the local machine (localhost/loopback).",
+    };
+  }
+  try {
+    const addresses = await resolveHost(host);
+    if (addresses.length > 0 && addresses.every((address) => isLoopbackAddress(address))) {
+      return {
+        destination: "loopback",
+        notice: "destination: loopback — this response came from the local machine (localhost/loopback).",
+      };
+    }
+  } catch {
+    // Best-effort only; the pre-request assertion already gated the hop.
+  }
+  return { destination: "public" };
 }
 
 function baseContentType(header: string | null): string {

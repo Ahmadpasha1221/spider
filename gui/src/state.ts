@@ -10,6 +10,8 @@ import type {
   PermissionRuleCategory,
   RuntimeProvider,
   SessionListItem,
+  SkillConflictView,
+  SkillItemView,
   TodoItemView,
   UserQuestionOptionView,
 } from "./protocol";
@@ -29,7 +31,7 @@ export interface PendingQuestion {
  */
 export type AppView = "chat" | "settings";
 /** Sections inside the redesigned Settings page. */
-export type SettingsSection = "models" | "behaviour" | "autoApprove" | "indexing" | "about";
+export type SettingsSection = "models" | "behaviour" | "skills" | "autoApprove" | "indexing" | "about";
 
 /** Live agent execution phase, derived only from backend runtime events. */
 export type AgentPhase = "idle" | "submitting" | "streaming" | "toolRunning" | "completed" | "failed" | "cancelled";
@@ -124,6 +126,11 @@ export interface AppState {
   settingsSection: SettingsSection;
   /** Workspace checkpoints for the active conversation (A2, host-authoritative). */
   checkpoints: CheckpointView[];
+  /** Agent Skills (host-authoritative). */
+  skills: SkillItemView[];
+  skillConflicts: SkillConflictView[];
+  skillsLoading: boolean;
+  skillsFilter: string;
 }
 
 export function createInitialState(): AppState {
@@ -153,6 +160,10 @@ export function createInitialState(): AppState {
     pendingQuestion: undefined,
     settingsSection: "models",
     checkpoints: [],
+    skills: [],
+    skillConflicts: [],
+    skillsLoading: false,
+    skillsFilter: "",
   };
 }
 

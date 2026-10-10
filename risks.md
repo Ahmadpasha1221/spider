@@ -95,10 +95,22 @@ Spider provides an autonomous, model-agnostic coding agent experience for VS Cod
 
 ## 3. Recommended Safety & Mitigation Practices
 
+> **Checkpoint limits (Risk 1 hardening):** Spider now captures a file-change
+> checkpoint plus a best-effort `git stash push -m "spider: ..."` snapshot
+> before each agent run (and on demand via the `CHECKPOINT_NOW` message).
+> Restoring reverts recorded file edits and re-applies the matching stash
+> entry. Graceful when the workspace is not a git repo or the tree is clean.
+>
+> **Shell side-effects are NOT revertible.** A checkpoint restore cannot undo
+> `run_command` executions, background processes, network calls, installed
+> packages, deleted-but-untracked external state, or anything outside the
+> working tree. Review the transcript/command output before restoring, and
+> keep the Auto-Approve Shield disabled for destructive work.
+
 When using Spider in daily workflows, follow these defensive guidelines:
 
 1. **Keep the Auto-Approve Shield Disabled**: Always retain interactive human-in-the-loop approval for file modifications and terminal commands.
-2. **Commit or Stash Before Agent Runs**: Because Spider lacks automated checkpoint snapshots, ensure your Git working tree is clean before initiating complex tasks so you can revert with `git reset --hard` if needed.
+2. **Commit or Stash Before Agent Runs**: Spider now snapshots automatically, but for high-stakes refactors still ensure your Git working tree is clean before initiating complex tasks so you can revert with `git reset --hard` if needed.
 3. **Respect Workspace Trust**: Never open untrusted third-party code in "Trusted" mode with Spider enabled.
 4. **Use High-Capability Models for Multi-Step Edits**: For complex tasks requiring multi-step tool calls, prefer well-aligned frontier models (Claude 3.5 Sonnet / GPT-4o via OpenRouter) rather than small local models that may hallucinate destructive operations.
 5. **Monitor System Processes**: Periodically check for orphan processes if running background commands or dev servers during extended development sessions.

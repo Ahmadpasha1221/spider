@@ -6,6 +6,7 @@ import { STORAGE_KEYS, readState } from "../shared/storageKeys";
 const SESSIONS_STORAGE_KEY = STORAGE_KEYS.sessions.current;
 const ACTIVE_SESSION_STORAGE_KEY = STORAGE_KEYS.activeSession.current;
 const TASK_PLANS_STORAGE_KEY = STORAGE_KEYS.taskPlans.current;
+const CHECKPOINTS_STORAGE_KEY = STORAGE_KEYS.checkpoints.current;
 
 const AGENT_STATUSES: readonly AgentStatus[] = [
   "IDLE",
@@ -64,7 +65,17 @@ export class SessionStore {
       this.workspaceState.update(SESSIONS_STORAGE_KEY, undefined),
       this.workspaceState.update(ACTIVE_SESSION_STORAGE_KEY, undefined),
       this.workspaceState.update(TASK_PLANS_STORAGE_KEY, undefined),
+      this.workspaceState.update(CHECKPOINTS_STORAGE_KEY, undefined),
     ]);
+  }
+
+  loadCheckpoints(): Record<string, unknown> {
+    const raw = readState<Record<string, unknown>>(this.workspaceState, STORAGE_KEYS.checkpoints, {});
+    return typeof raw === "object" && raw !== null ? raw : {};
+  }
+
+  async saveCheckpoints(checkpoints: Record<string, unknown>): Promise<void> {
+    await this.workspaceState.update(CHECKPOINTS_STORAGE_KEY, checkpoints);
   }
 
   loadTaskPlans(): Record<string, unknown> {

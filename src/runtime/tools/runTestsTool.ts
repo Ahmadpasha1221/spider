@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { win32 as pathWin32, posix as pathPosix } from "node:path";
 import type { ExecutionManager } from "../execution/executionManager";
 import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
 import { pathExists, resolveWorkspacePathSafe } from "./workspacePath";
@@ -87,7 +88,8 @@ export async function runTests(
     );
   }
   const args = buildTargetArgs(runner, rawArgs, testPath, filter);
-  const cwd = await parseCwd(input.cwd, context.workspacePath);
+  const hostPlatform = deps.executionManager?.getEnvironment().hostPlatform;
+  const cwd = await parseCwd(input.cwd, context.workspacePath, hostPlatform);
   const timeoutMs = parseTimeout(input.timeoutMs);
   if (context.signal?.aborted) {
     throw new ToolExecutionError("cancelled", "Tool execution was cancelled.");
@@ -193,9 +195,13 @@ export function parseArgs(value: unknown): string[] {
   return args;
 }
 
-export async function parseCwd(value: unknown, workspacePath: string): Promise<string> {
+export async function parseCwd(value: unknown, workspacePath: string, hostPlatform?: NodeJS.Platform): Promise<string> {
+  // Choose the path module based on the host platform to ensure correct path resolution
+  // for the simulated environment (e.g., win32 on Linux runner).
+  const effectivePlatform = hostPlatform ?? process.platform;
+  const pathMod = effectivePlatform === "win32" ? pathWin32 : pathPosix;
   if (value === undefined || value === null || value === "" || value === ".") {
-    return path.resolve(workspacePath);
+    return pathMod.resolve(workspacePath);
   }
   if (typeof value !== "string") {
     throw new ToolExecutionError("invalid_input", "cwd must be a workspace-relative path.");

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { ExecutionContextError, type ExecutionContext } from "../execution/executionTypes";
-import { buildCommandInvocation } from "../execution/executionManager";
+import { buildCommandInvocation, buildArgvInvocation, type SpawnInvocation } from "../execution/executionManager";
 
 export interface CommandRunResult {
   readonly command: string;
@@ -42,14 +42,28 @@ export interface RunCommandOptions {
   readonly spawnFn?: typeof spawn;
 }
 
+export interface RunArgvCommandOptions {
+  readonly executable: string;
+  readonly args: readonly string[];
+  /** Working directory *in the execution environment*. */
+  readonly cwd: string;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+  readonly onOutput?: (stream: "stdout" | "stderr", chunk: string) => void;
+  readonly context: ExecutionContext;
+  readonly spawnFn?: typeof spawn;
+  /**
+   * Explicit execution environment overrides (e.g. sanitized environment for skill scripts).
+   * When provided, this replaces the context's environment completely for defense-in-depth.
+   */
+  readonly env?: Record<string, string>;
+}
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 200_000;
 
 export function runWorkspaceCommand(options: RunCommandOptions): Promise<CommandRunResult> {
   // Security invariant: context must be a valid ExecutionContext object.
-  // We validate this at runtime in addition to the TypeScript type, because
-  // callers can arrive through JavaScript, tests with cast types, or
-  // configuration paths that bypass strict checking.
   if (!options.context || typeof options.context !== "object") {
     throw new ExecutionContextError(
       "Execution context is required before running commands. " +
@@ -58,16 +72,87 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
     );
   }
 
-  const timeoutMs = options.timeoutMs && options.timeoutMs > 0 ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const invocation = buildCommandInvocation(options.context, options.command, options.cwd);
+  return executeSpawnedProcess(
+    options.spawnFn ?? spawn,
+    invocation,
+    options.command,
+    options.cwd,
+    options.timeoutMs,
+    options.signal,
+    options.onOutput,
+  );
+}
+
+/**
+ * Executes an argv command directly (with shell: false and no shell interpretation).
+ * Used by run_skill_script to prevent command injection through shell metacharacters.
+ */
+export function runWorkspaceArgvCommand(options: RunArgvCommandOptions): Promise<CommandRunResult> {
+  // Security invariant: context must be a valid ExecutionContext object.
+  if (!options.context || typeof options.context !== "object") {
+    throw new ExecutionContextError(
+      "Execution context is required before running argv commands. " +
+      "A missing or invalid ExecutionContext is treated as a security failure — " +
+      "Spider will not fall back to uncontrolled shell execution.",
+    );
+  }
+
+  if (typeof options.executable !== "string" || options.executable.trim().length === 0) {
+    throw new ExecutionContextError("Executable must be a non-empty string for argv command execution.");
+  }
+
+  if (options.executable.startsWith("-")) {
+    throw new ExecutionContextError("Executable must not start with a hyphen flag.");
+  }
+
+  const effectiveContext = options.env
+    ? { ...options.context, env: { ...options.env } }
+    : options.context;
+
+  const invocation = buildArgvInvocation(
+    effectiveContext,
+    options.executable,
+    options.args,
+    options.cwd,
+  );
+
+  const commandDisplay = `${options.executable}${options.args.length > 0 ? " " + options.args.join(" ") : ""}`;
+
+  return executeSpawnedProcess(
+    options.spawnFn ?? spawn,
+    invocation,
+    commandDisplay,
+    options.cwd,
+    options.timeoutMs,
+    options.signal,
+    options.onOutput,
+  );
+}
+
+function executeSpawnedProcess(
+  spawnFn: typeof spawn,
+  invocation: SpawnInvocation,
+  commandDisplay: string,
+  cwdDisplay: string,
+  timeoutMsInput?: number,
+  signal?: AbortSignal,
+  onOutput?: (stream: "stdout" | "stderr", chunk: string) => void,
+): Promise<CommandRunResult> {
+  const timeoutMs = timeoutMsInput && timeoutMsInput > 0 ? timeoutMsInput : DEFAULT_TIMEOUT_MS;
 
   return new Promise((resolve, reject) => {
-    if (options.signal?.aborted) {
-      resolve(cancelledResult(options.command, options.cwd));
+    if (signal?.aborted) {
+      resolve(cancelledResult(commandDisplay, cwdDisplay));
       return;
     }
 
-    const spawnFn = options.spawnFn ?? spawn;
-    const child = spawnWithContext(spawnFn, options.context, options.command, options.cwd);
+    const child = spawnFn(invocation.file, [...invocation.args], {
+      ...(invocation.cwd !== undefined ? { cwd: invocation.cwd } : {}),
+      env: invocation.env,
+      shell: invocation.shell,
+      windowsHide: true,
+    });
 
     let stdout = "";
     let stderr = "";
@@ -82,17 +167,17 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
     const onAbort = () => {
       killProcess(child);
     };
-    options.signal?.addEventListener("abort", onAbort, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout?.on("data", (chunk: Buffer | string) => {
       const text = String(chunk);
       stdout = appendCapped(stdout, text);
-      options.onOutput?.("stdout", text);
+      onOutput?.("stdout", text);
     });
     child.stderr?.on("data", (chunk: Buffer | string) => {
       const text = String(chunk);
       stderr = appendCapped(stderr, text);
-      options.onOutput?.("stderr", text);
+      onOutput?.("stderr", text);
     });
     child.on("error", (error) => {
       finish(() => reject(error));
@@ -100,12 +185,12 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
     child.on("close", (code) => {
       finish(() => {
         resolve({
-          command: options.command,
-          cwd: options.cwd,
+          command: commandDisplay,
+          cwd: cwdDisplay,
           stdout,
           stderr,
-          exitCode: timedOut || options.signal?.aborted ? null : code,
-          cancelled: options.signal?.aborted === true && !timedOut,
+          exitCode: timedOut || signal?.aborted ? null : code,
+          cancelled: signal?.aborted === true && !timedOut,
           timedOut,
         });
       });
@@ -117,24 +202,9 @@ export function runWorkspaceCommand(options: RunCommandOptions): Promise<Command
       }
       settled = true;
       clearTimeout(timeout);
-      options.signal?.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onAbort);
       action();
     }
-  });
-}
-
-function spawnWithContext(
-  spawnFn: typeof spawn,
-  context: ExecutionContext,
-  command: string,
-  executionCwd: string,
-): ReturnType<typeof spawn> {
-  const invocation = buildCommandInvocation(context, command, executionCwd);
-  return spawnFn(invocation.file, [...invocation.args], {
-    ...(invocation.cwd !== undefined ? { cwd: invocation.cwd } : {}),
-    env: invocation.env,
-    shell: invocation.shell,
-    windowsHide: true,
   });
 }
 

@@ -12,6 +12,8 @@ export type WebviewMessage =
   | { type: "GET_TRANSCRIPT"; sessionId: string }
   /** Workspace checkpoints for a conversation (A2). */
   | { type: "GET_CHECKPOINTS"; sessionId: string }
+  /** Manual checkpoint between messages (Risk 1 / W7). */
+  | { type: "CHECKPOINT_NOW"; sessionId: string; label?: string }
   /** Rolls the workspace back to a checkpoint and returns the new timeline. */
   | { type: "RESTORE_CHECKPOINT"; checkpointId: string }
   | { type: "CANCEL_RUN"; sessionId: string }
@@ -56,7 +58,11 @@ export type WebviewMessage =
   | { type: "CANCEL_USER_QUESTION"; requestId: string }
   | { type: "GET_EXTENSION_INFO" }
   /** Markdown link click: open the URL outside the webview. */
-  | { type: "OPEN_URL"; url: string };
+  | { type: "OPEN_URL"; url: string }
+  /** Agent Skills management: query, toggle enabled state, or force re-scan. */
+  | { type: "GET_SKILLS" }
+  | { type: "TOGGLE_SKILL"; skillName: string }
+  | { type: "RELOAD_SKILLS" };
 
 export type AuthStatus = "disconnected" | "connecting" | "connected" | "error";
 
@@ -116,6 +122,8 @@ export interface CheckpointView {
   label: string;
   timestamp: number;
   changeCount: number;
+  /** True when a git stash snapshot backs this checkpoint (Risk 1). */
+  gitSnapshot?: boolean;
 }
 
 /** Static extension metadata for Settings → About Spider. */
@@ -147,7 +155,31 @@ export interface TodoItemView {
   blockedReason?: string;
 }
 
+/** Discovered agent skill summary displayed in Settings → Agent Skills. */
+export interface SkillItemView {
+  name: string;
+  description: string;
+  scope: "workspace" | "global" | "bundled" | "imported";
+  enabled: boolean;
+  resourceCount: number;
+  scriptCount: number;
+  skillDir: string;
+  license?: string;
+  compatibility?: string;
+}
+
+/** Shadowed duplicate skill conflict info displayed in Settings → Agent Skills. */
+export interface SkillConflictView {
+  skillName: string;
+  activeScope: "workspace" | "global" | "bundled" | "imported";
+  activeDir: string;
+  shadowedScope: "workspace" | "global" | "bundled" | "imported";
+  shadowedDir: string;
+  reason: string;
+}
+
 export type ExtensionMessage =
+  | { type: "SKILLS_UPDATED"; skills: SkillItemView[]; conflicts: SkillConflictView[] }
   | { type: "AGENT_STATE"; state: AgentState }
   | { type: "AGENT_MESSAGE"; message: string; messageId?: string; timestamp?: number; modelName?: string }
   | { type: "AGENT_TEXT_DELTA"; sessionId: string; text: string }

@@ -40,6 +40,10 @@ function createStore() {
     loadActiveSessionId: () => undefined,
     saveSessions: vi.fn().mockResolvedValue(undefined),
     saveActiveSessionId: vi.fn().mockResolvedValue(undefined),
+    loadTaskPlans: () => ({}),
+    saveTaskPlans: vi.fn().mockResolvedValue(undefined),
+    loadCheckpoints: () => ({}),
+    saveCheckpoints: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -123,6 +127,105 @@ describe("RuntimeManager message actions", () => {
     const after = await manager.loadTranscript(session.sessionId);
     expect(after.some((entry) => entry.kind === "assistant")).toBe(false);
     expect(after.some((entry) => entry.id === "user-msg-1")).toBe(true);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("createCheckpoint snapshots the timeline without a repo (manual CHECKPOINT_NOW path)", async () => {
+    const { manager, session, root } = await makeManager();
+    const gitCalls: unknown[] = [];
+    (manager as unknown as { options: { gitExec: unknown } }).options = {
+      ...(manager as unknown as { options: Record<string, unknown> }).options,
+      gitExec: async () => {
+        gitCalls.push(1);
+        return { stdout: "", stderr: "not a git repo", exitCode: 128 };
+      },
+    };
+
+    const items = await manager.createCheckpoint(session.sessionId, "before risky edit");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ label: "before risky edit", changeCount: 0 });
+    expect(items[0].gitSnapshot).toBeUndefined();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("createCheckpoint records the git snapshot when one is captured", async () => {
+    const { manager, session, root } = await makeManager();
+    (manager as unknown as { options: { gitExec: unknown } }).options = {
+      ...(manager as unknown as { options: Record<string, unknown> }).options,
+      gitExec: async (_command: string, args: readonly string[]) => {
+        if (args[0] === "rev-parse") {
+          return { stdout: "true\n", stderr: "", exitCode: 0 };
+        }
+        if (args[0] === "stash" && args[1] === "push") {
+          return { stdout: "Saved working directory", stderr: "", exitCode: 0 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+
+    const items = await manager.createCheckpoint(session.sessionId, "git backed");
+    expect(items[0]).toMatchObject({ label: "git backed", gitSnapshot: true });
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it("persists the checkpoint timeline and restores it on a fresh manager", async () => {
+    const saved: Record<string, unknown> = {};
+    const store = {
+      loadSessions: () => [],
+      loadActiveSessionId: () => undefined,
+      saveSessions: vi.fn().mockResolvedValue(undefined),
+      saveActiveSessionId: vi.fn().mockResolvedValue(undefined),
+      loadTaskPlans: () => ({}),
+      saveTaskPlans: vi.fn().mockResolvedValue(undefined),
+      loadCheckpoints: () => saved,
+      saveCheckpoints: vi.fn(async (value: Record<string, unknown>) => {
+        for (const key of Object.keys(saved)) {
+          delete saved[key];
+        }
+        Object.assign(saved, value);
+      }),
+    };
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "codevia-checkpoint-persist-"));
+    const transcriptStore = new TranscriptStore({ fsPath: root } as never);
+    const permissionManager = new PermissionManager(
+      createDefaultPermissionPolicy({ isWorkspaceTrusted: () => true }),
+    );
+    const runtime = new ScriptedRuntime();
+    const first = new RuntimeManager({
+      sessionStore: store as never,
+      permissionManager,
+      runtimes: [runtime],
+      toolExecutor: new WorkspaceToolExecutor(),
+      defaultWorkspacePath: root,
+      transcriptStore,
+      gitExec: async () => ({ stdout: "", stderr: "not a repo", exitCode: 128 }),
+    });
+    await first.setProvider({ provider: "mock" });
+    const session = first.createSession(root);
+    await first.createCheckpoint(session.sessionId, "survives restart");
+
+    const second = new RuntimeManager({
+      sessionStore: {
+        ...store,
+        loadSessions: () => [
+          {
+            sessionId: session.sessionId,
+            provider: "mock",
+            workspacePath: root,
+            status: "IDLE",
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          },
+        ],
+      } as never,
+      permissionManager,
+      runtimes: [runtime],
+      toolExecutor: new WorkspaceToolExecutor(),
+      defaultWorkspacePath: root,
+      transcriptStore,
+    });
+    await second.restoreSessions();
+    expect(second.listCheckpoints(session.sessionId).map((item) => item.label)).toEqual(["survives restart"]);
     await fs.rm(root, { recursive: true, force: true });
   });
 });
