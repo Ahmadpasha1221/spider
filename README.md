@@ -187,9 +187,9 @@ ollama serve
 
 Download any supported coding model:
 
-```bash
-ollama pull <your-model>
-```
+- **Agent-first, not chat-first.** Spider plans, calls real tools against your workspace, observes the results, and keeps going until the task is done — a real agent loop running as a normal VS Code extension.
+- **Model-agnostic by design.** One runtime interface, seven runtimes: fully local through **Ollama** or any **OpenAI-compatible** server (LM Studio, llama.cpp, vLLM…), or cloud through **OpenRouter**, **Google Gemini**, **NVIDIA**, and **Cursor agents**. Switch providers without changing your workflow — your code never has to leave your machine if you don't want it to.
+- **Everything is verified.** A real permission system, a bounded tool set, and a verification loop (`get_problems`, `run_tests`) let the agent check its own edits instead of claiming success.
 
 Open Spider in VS Code and configure:
 
@@ -363,31 +363,51 @@ Verify
 
 # 2. Security architecture
 
-Spider is designed around explicit execution boundaries instead of relying on model instructions such as "don't do anything dangerous."
-
-## Permission pipeline
-
-Every tool call passes through a centralized permission pipeline:
-
-```text
-Tool Call
-   ↓
-Trust Checks
-   ↓
-Policy Rules
-   ↓
-Argument Validation
-   ↓
-Permission Decision
-   ↓
-Execution
-   ↓
-Bounded Structured Result
-```
+| Provider | Kind | Notes |
+|---|---|---|
+| **Ollama** | Local | Fully offline; a hard project rule is that Ollama must never break |
+| **OpenAI-compatible** | Local / self-hosted | LM Studio, llama.cpp, vLLM — anything speaking the API |
+| **OpenRouter** | Cloud | One key, many frontier models; key stored in SecretStorage |
+| **Google Gemini** | Cloud | Your own Google AI Studio API key; live model discovery; key stored in SecretStorage |
+| **NVIDIA** | Cloud | Your own NVIDIA API Catalog key (`build.nvidia.com`); live model discovery; key stored in SecretStorage |
+| **Cursor agents** | Cloud | Via the official `@cursor/sdk` |
+| **Mock** | Local | Deterministic runtime for UI development and tests |
 
 Destructive operations such as `delete_file` require confirmation.
 
 Network-capable operations are not silently granted permission.
+
+### Using Google Gemini
+
+Spider talks to Gemini through Google's official **OpenAI-compatible** endpoint (`https://generativelanguage.googleapis.com/v1beta/openai`). You bring your own key — Spider never bundles or proxies one.
+
+1. Create an API key in **Google AI Studio** → [aistudio.google.com/apikey](https://aistudio.google.com/apikey).
+2. In Spider, open **Settings → Models**, choose **Google Gemini**, paste the key, and click **Save and connect**.
+3. Spider validates the key and loads the available Gemini models. Pick one (or use **Refresh models** to re-fetch) and start working.
+
+Notes:
+
+- The key is stored only in VS Code `SecretStorage`, scoped to the Gemini provider profile. It is never written to settings, state, logs, or transcripts, and never sent back to the webview.
+- Google applies its own **quota, pricing, and API restrictions** to your key; those are between you and Google.
+- The OpenAI-compatible layer is a compatibility surface and **may not expose every Gemini-specific feature** (thinking controls, grounding, image/video generation, etc.). Spider enables the chat features it can verify: streaming, native function calling, and structured output.
+- **Saving a key and a successful live connection are different states.** A saved key that Google rejects shows an explicit error; Spider never reports a fake "connected" state.
+- Troubleshooting: a `401/403` means Google rejected the key (re-check or replace it); `429` is a rate limit (wait and retry); an empty model list means no chat-capable Gemini models were returned for this key. If startup reconnects fail, re-enter the key in **Settings → Models**.
+
+### Using NVIDIA (API Catalog)
+
+Spider talks to NVIDIA through the **cloud-hosted NVIDIA API Catalog** (`https://integrate.api.nvidia.com/v1`). You bring your own NVIDIA API key — Spider never bundles or proxies one. This is the hosted catalog, **not** a self-hosted NVIDIA NIM container or a local OpenAI-compatible server.
+
+1. Create an NVIDIA Developer account and generate an API key at [build.nvidia.com](https://build.nvidia.com/) (the key starts with `nvapi-`).
+2. In Spider, open **Settings → Models**, choose **NVIDIA**, paste the key, and click **Save and connect**.
+3. Spider validates the key and loads the catalog's chat models. Pick one (or use **Refresh models** to re-fetch) and start working.
+
+Notes:
+
+- The key is stored only in VS Code `SecretStorage`, scoped to the NVIDIA provider profile. It is never written to settings, state, logs, or transcripts, and never sent back to the webview.
+- NVIDIA's catalog hosts models from many organizations (Meta, Mistral, Qwen, DeepSeek, NVIDIA itself, …). Spider does **not** filter by vendor name; it filters out non-chat entries (embeddings, reranking, speech, image/video, detection, etc.).
+- **Model capabilities vary.** The catalog exposes no per-model capability metadata, so Spider does not advertise native tool calling for NVIDIA models; it uses its existing safe text-tool fallback. Streaming is used for all chats.
+- Access, availability, quota, pricing, and per-model permissions are set by NVIDIA and can differ per key.
+- Troubleshooting: a `401/403` means the key is invalid or lacks access to that model; `402`/`429` indicate quota or rate limits (wait and retry); an empty list means no chat-capable models were returned for this key. If startup reconnects fail, re-enter the key in **Settings → Models**.
 
 ---
 
@@ -991,7 +1011,10 @@ OpenAI-compatible provider
 Install dependencies:
 
 ```bash
-pnpm install
+pnpm run typecheck   # both tsconfigs (extension + GUI)
+pnpm run lint        # eslint, zero warnings allowed
+pnpm run test        # vitest, all unit + integration tests
+pnpm run compile     # esbuild production build
 ```
 
 Run type checking:

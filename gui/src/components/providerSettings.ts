@@ -13,6 +13,16 @@ export function renderProviderSettings(
     onRefreshOpenRouter: () => void;
     onOpenRouterModel: (modelId: string) => void;
     onOpenRouterSearch: (query: string) => void;
+    onGeminiConnect: (apiKey: string) => void;
+    onGeminiDisconnect: () => void;
+    onRefreshGemini: () => void;
+    onGeminiModel: (modelId: string) => void;
+    onGeminiSearch: (query: string) => void;
+    onNvidiaConnect: (apiKey: string) => void;
+    onNvidiaDisconnect: () => void;
+    onRefreshNvidia: () => void;
+    onNvidiaModel: (modelId: string) => void;
+    onNvidiaSearch: (query: string) => void;
     onLocalProvider: (provider: LocalProvider) => void;
     onRefreshLocal: () => void;
     onLocalConnect: (baseUrl: string, apiKey: string, modelId: string) => void;
@@ -32,7 +42,7 @@ export function renderProviderSettings(
   providerLabel.textContent = "AI provider";
   const providerSelect = document.createElement("select");
   providerSelect.className = "select-control";
-  for (const [value, label] of [["cursor", "Cursor"], ["local", "Local AI"], ["openrouter", "OpenRouter"], ["mock", "Mock / Test"]] as const) {
+  for (const [value, label] of [["cursor", "Cursor"], ["local", "Local AI"], ["openrouter", "OpenRouter"], ["gemini", "Google Gemini"], ["nvidia", "NVIDIA"], ["mock", "Mock / Test"]] as const) {
     const option = document.createElement("option");
     option.value = value;
     option.textContent = label;
@@ -49,6 +59,10 @@ export function renderProviderSettings(
     renderLocal(section, state, handlers);
   } else if (state.provider === "openrouter") {
     renderOpenRouter(section, state, handlers);
+  } else if (state.provider === "gemini") {
+    renderGemini(section, state, handlers);
+  } else if (state.provider === "nvidia") {
+    renderNvidia(section, state, handlers);
   } else {
     renderMock(section, handlers);
   }
@@ -409,6 +423,256 @@ function formatContextLength(contextWindow: number): string {
 function formatPrice(price: number | undefined): string {
   if (price === undefined) return "?";
   return price === 0 ? "0" : price < 0.1 ? price.toFixed(3) : price.toFixed(2);
+}
+
+function renderGemini(root: HTMLElement, state: AppState, handlers: Parameters<typeof renderProviderSettings>[2]): void {
+  const card = document.createElement("div");
+  card.className = "provider-card";
+
+  const heading = document.createElement("h2");
+  heading.textContent = "Google Gemini";
+  card.appendChild(heading);
+
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent =
+    "Use Gemini models with your own Google AI Studio API key. The key is stored in VS Code secure storage and never leaves the extension host. Google may apply its own quota, pricing, and API restrictions.";
+  card.appendChild(hint);
+
+  const status = document.createElement("div");
+  status.className = `connection-state ${state.runtimeError ? "is-error" : ""}`;
+  status.textContent = state.geminiLoading
+    ? "Loading Gemini models…"
+    : state.runtimeConnected && state.provider === "gemini"
+      ? "Connected"
+      : "Not connected";
+  card.appendChild(status);
+
+  const keyField = document.createElement("div");
+  keyField.className = "field";
+  const keyLabel = document.createElement("label");
+  keyLabel.textContent = state.runtimeConnected ? "Replace Gemini API key" : "Gemini API key";
+  const keyInput = document.createElement("input");
+  keyInput.id = "gemini-api-key";
+  keyInput.type = "password";
+  keyInput.autocomplete = "off";
+  keyInput.placeholder = "Paste your Gemini API key (AIza…)";
+  keyInput.disabled = state.geminiLoading;
+  keyField.append(keyLabel, keyInput);
+  card.appendChild(keyField);
+
+  const connect = document.createElement("button");
+  connect.className = "btn";
+  connect.textContent = state.runtimeConnected ? "Update key and connect" : "Save and connect";
+  connect.disabled = state.geminiLoading;
+  connect.onclick = () => {
+    const value = keyInput.value.trim();
+    if (value.length === 0) return;
+    handlers.onGeminiConnect(value);
+    keyInput.value = "";
+  };
+  card.appendChild(connect);
+
+  if (state.runtimeConnected && state.provider === "gemini") {
+    const disconnect = document.createElement("button");
+    disconnect.className = "btn btn-danger";
+    disconnect.textContent = "Disconnect";
+    disconnect.disabled = state.geminiLoading;
+    disconnect.onclick = handlers.onGeminiDisconnect;
+    card.appendChild(disconnect);
+  }
+
+  // Model picker: search box plus dropdown populated from the live catalog.
+  const modelField = document.createElement("div");
+  modelField.className = "field";
+  const modelLabel = document.createElement("label");
+  modelLabel.textContent = "Model (from the Gemini catalog)";
+  modelField.appendChild(modelLabel);
+
+  const search = document.createElement("input");
+  search.id = "gemini-model-search";
+  search.type = "search";
+  search.placeholder = "Filter models by name or id…";
+  search.value = state.geminiModelFilter;
+  search.oninput = () => handlers.onGeminiSearch(search.value);
+  modelField.appendChild(search);
+
+  const modelSelect = document.createElement("select");
+  modelSelect.id = "gemini-model-select";
+  modelSelect.className = "select-control";
+  const filteredModels = filterModels(state.geminiModels, state.geminiModelFilter);
+  if (filteredModels.length === 0) {
+    const option = document.createElement("option");
+    option.textContent = state.geminiLoading
+      ? "Loading models…"
+      : state.geminiModels.length === 0
+        ? "No models loaded — connect or refresh"
+        : "No models match the filter";
+    option.disabled = true;
+    option.selected = true;
+    modelSelect.appendChild(option);
+  } else {
+    for (const model of filteredModels) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = modelDropdownLabel(model);
+      option.selected = model.id === state.selectedModelId;
+      modelSelect.appendChild(option);
+    }
+  }
+  modelSelect.disabled = filteredModels.length === 0;
+  modelSelect.onchange = () => handlers.onGeminiModel(modelSelect.value);
+  modelField.appendChild(modelSelect);
+  card.appendChild(modelField);
+
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  const refresh = document.createElement("button");
+  refresh.className = "btn btn-ghost";
+  refresh.textContent = "Refresh models";
+  refresh.disabled = state.geminiLoading;
+  refresh.onclick = handlers.onRefreshGemini;
+  actions.appendChild(refresh);
+  card.appendChild(actions);
+
+  const meta = document.createElement("div");
+  meta.className = "hint";
+  const selected = state.geminiModels.find((model) => model.id === state.selectedModelId);
+  meta.textContent = selected ? modelMetadataLine(selected) : "";
+  card.appendChild(meta);
+
+  const note = document.createElement("p");
+  note.className = "hint";
+  note.textContent =
+    "Create a Gemini API key in Google AI Studio (aistudio.google.com/apikey). The OpenAI-compatible endpoint may not expose every Gemini-specific feature.";
+  card.appendChild(note);
+
+  root.appendChild(card);
+}
+
+function renderNvidia(root: HTMLElement, state: AppState, handlers: Parameters<typeof renderProviderSettings>[2]): void {
+  const card = document.createElement("div");
+  card.className = "provider-card";
+
+  const heading = document.createElement("h2");
+  heading.textContent = "NVIDIA";
+  card.appendChild(heading);
+
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent =
+    "Run Spider on models hosted in the NVIDIA API Catalog with your own NVIDIA API key. The key is stored in VS Code secure storage and never leaves the extension host. This uses NVIDIA's hosted catalog, not a self-hosted NIM deployment. Access, availability, quota, pricing, and per-model permissions are set by NVIDIA and may vary.";
+  card.appendChild(hint);
+
+  const status = document.createElement("div");
+  status.className = `connection-state ${state.runtimeError ? "is-error" : ""}`;
+  status.textContent = state.nvidiaLoading
+    ? "Loading NVIDIA models…"
+    : state.runtimeConnected && state.provider === "nvidia"
+      ? "Connected"
+      : "Not connected";
+  card.appendChild(status);
+
+  const keyField = document.createElement("div");
+  keyField.className = "field";
+  const keyLabel = document.createElement("label");
+  keyLabel.textContent = state.runtimeConnected && state.provider === "nvidia" ? "Replace NVIDIA API key" : "NVIDIA API key";
+  const keyInput = document.createElement("input");
+  keyInput.id = "nvidia-api-key";
+  keyInput.type = "password";
+  keyInput.autocomplete = "off";
+  keyInput.placeholder = "Paste your NVIDIA API key (nvapi-…)";
+  keyInput.disabled = state.nvidiaLoading;
+  keyField.append(keyLabel, keyInput);
+  card.appendChild(keyField);
+
+  const connect = document.createElement("button");
+  connect.className = "btn";
+  connect.textContent = state.runtimeConnected && state.provider === "nvidia" ? "Update key and connect" : "Save and connect";
+  connect.disabled = state.nvidiaLoading;
+  connect.onclick = () => {
+    const value = keyInput.value.trim();
+    if (value.length === 0) return;
+    handlers.onNvidiaConnect(value);
+    keyInput.value = "";
+  };
+  card.appendChild(connect);
+
+  if (state.runtimeConnected && state.provider === "nvidia") {
+    const disconnect = document.createElement("button");
+    disconnect.className = "btn btn-danger";
+    disconnect.textContent = "Disconnect";
+    disconnect.disabled = state.nvidiaLoading;
+    disconnect.onclick = handlers.onNvidiaDisconnect;
+    card.appendChild(disconnect);
+  }
+
+  // Model picker: search box plus dropdown populated from the live catalog.
+  const modelField = document.createElement("div");
+  modelField.className = "field";
+  const modelLabel = document.createElement("label");
+  modelLabel.textContent = "Model (from the NVIDIA API Catalog)";
+  modelField.appendChild(modelLabel);
+
+  const search = document.createElement("input");
+  search.id = "nvidia-model-search";
+  search.type = "search";
+  search.placeholder = "Filter models by name or id…";
+  search.value = state.nvidiaModelFilter;
+  search.oninput = () => handlers.onNvidiaSearch(search.value);
+  modelField.appendChild(search);
+
+  const modelSelect = document.createElement("select");
+  modelSelect.id = "nvidia-model-select";
+  modelSelect.className = "select-control";
+  const filteredModels = filterModels(state.nvidiaModels, state.nvidiaModelFilter);
+  if (filteredModels.length === 0) {
+    const option = document.createElement("option");
+    option.textContent = state.nvidiaLoading
+      ? "Loading models…"
+      : state.nvidiaModels.length === 0
+        ? "No models loaded — connect or refresh"
+        : "No models match the filter";
+    option.disabled = true;
+    option.selected = true;
+    modelSelect.appendChild(option);
+  } else {
+    for (const model of filteredModels) {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = modelDropdownLabel(model);
+      option.selected = model.id === state.selectedModelId;
+      modelSelect.appendChild(option);
+    }
+  }
+  modelSelect.disabled = filteredModels.length === 0;
+  modelSelect.onchange = () => handlers.onNvidiaModel(modelSelect.value);
+  modelField.appendChild(modelSelect);
+  card.appendChild(modelField);
+
+  const actions = document.createElement("div");
+  actions.className = "form-actions";
+  const refresh = document.createElement("button");
+  refresh.className = "btn btn-ghost";
+  refresh.textContent = "Refresh models";
+  refresh.disabled = state.nvidiaLoading;
+  refresh.onclick = handlers.onRefreshNvidia;
+  actions.appendChild(refresh);
+  card.appendChild(actions);
+
+  const meta = document.createElement("div");
+  meta.className = "hint";
+  const selected = state.nvidiaModels.find((model) => model.id === state.selectedModelId);
+  meta.textContent = selected ? modelMetadataLine(selected) : "";
+  card.appendChild(meta);
+
+  const note = document.createElement("p");
+  note.className = "hint";
+  note.textContent =
+    "Get a key from the NVIDIA API Catalog (build.nvidia.com). Native tool calling is model-dependent and is not advertised for NVIDIA models, so Spider uses its safe text-tool fallback.";
+  card.appendChild(note);
+
+  root.appendChild(card);
 }
 
 function renderMock(root: HTMLElement, handlers: Parameters<typeof renderProviderSettings>[2]): void {

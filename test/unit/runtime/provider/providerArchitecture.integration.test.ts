@@ -93,6 +93,8 @@ describe("Provider Architecture & Runtime State Integration", () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "spider-provider-arch-"));
     const ollamaRuntime = new TrackedRuntime("ollama");
     const openRouterRuntime = new TrackedRuntime("openrouter");
+    const geminiRuntime = new TrackedRuntime("gemini");
+    const nvidiaRuntime = new TrackedRuntime("nvidia");
     const mockRuntime = new TrackedRuntime("mock");
 
     const sessionStore = createSessionStore(options?.initialSessions, options?.activeSessionId);
@@ -103,7 +105,7 @@ describe("Provider Architecture & Runtime State Integration", () => {
     const runtimeManager = new RuntimeManager({
       sessionStore: sessionStore as never,
       permissionManager,
-      runtimes: [ollamaRuntime, openRouterRuntime, mockRuntime],
+      runtimes: [ollamaRuntime, openRouterRuntime, geminiRuntime, nvidiaRuntime, mockRuntime],
       toolExecutor,
       defaultWorkspacePath: root,
       providerConfigStore: providerConfigStore as never,
@@ -114,6 +116,8 @@ describe("Provider Architecture & Runtime State Integration", () => {
       runtimeManager,
       ollamaRuntime,
       openRouterRuntime,
+      geminiRuntime,
+      nvidiaRuntime,
       mockRuntime,
       sessionStore,
       providerConfigStore,
@@ -338,5 +342,112 @@ describe("Provider Architecture & Runtime State Integration", () => {
     await runtimeManager.startTask("session-from-yesterday", "hi");
     expect(openRouterRuntime.sendMessage).toHaveBeenCalledTimes(1);
     expect(ollamaRuntime.sendMessage).toHaveBeenCalledTimes(0);
+  });
+
+  it("13. Gemini selected -> Gemini client executed; no other provider runs", async () => {
+    const { runtimeManager, geminiRuntime, openRouterRuntime, ollamaRuntime } = await createFixture();
+
+    await runtimeManager.setProvider({
+      provider: "gemini",
+      apiKey: "AIza-test-key",
+      modelId: "gemini-3.8-flash",
+    });
+
+    const session = runtimeManager.createSession();
+    expect(session.provider).toBe("gemini");
+    expect(runtimeManager.getProviderConfig()?.provider).toBe("gemini");
+
+    await runtimeManager.startTask(session.sessionId, "hi");
+    expect(geminiRuntime.sendMessage).toHaveBeenCalledTimes(1);
+    expect(geminiRuntime.sendMessage.mock.calls[0][0].modelId).toBe("gemini-3.8-flash");
+    expect(openRouterRuntime.sendMessage).not.toHaveBeenCalled();
+    expect(ollamaRuntime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("14. No silent fallback: missing Gemini API key throws instead of running another provider", async () => {
+    const { runtimeManager, geminiRuntime, ollamaRuntime } = await createFixture();
+
+    await runtimeManager.setProvider({ provider: "gemini", apiKey: "", modelId: "gemini-3.8-flash" });
+    const session = runtimeManager.createSession();
+
+    await expect(runtimeManager.startTask(session.sessionId, "hi")).rejects.toThrow(
+      /Gemini API key is missing/,
+    );
+    expect(geminiRuntime.sendMessage).not.toHaveBeenCalled();
+    expect(ollamaRuntime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("15. Restoring a checkpoint does NOT switch an explicit Gemini selection away", async () => {
+    const { runtimeManager, geminiRuntime, ollamaRuntime } = await createFixture();
+
+    await runtimeManager.setProvider({ provider: "gemini", apiKey: "AIza-valid", modelId: "gemini-3.8-flash" });
+    const session = runtimeManager.createSession();
+    await runtimeManager.startTask(session.sessionId, "hi");
+    expect(geminiRuntime.sendMessage).toHaveBeenCalledTimes(1);
+
+    const checkpoints = runtimeManager.listCheckpoints(session.sessionId);
+    expect(checkpoints.length).toBeGreaterThan(0);
+    await runtimeManager.restoreCheckpoint(checkpoints[0].id);
+
+    expect(runtimeManager.provider).toBe("gemini");
+    expect(runtimeManager.getProviderConfig()?.modelId).toBe("gemini-3.8-flash");
+
+    await runtimeManager.startTask(session.sessionId, "again");
+    expect(geminiRuntime.sendMessage).toHaveBeenCalledTimes(2);
+    expect(ollamaRuntime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("16. NVIDIA selected -> NVIDIA client executed; no other provider runs", async () => {
+    const { runtimeManager, nvidiaRuntime, geminiRuntime, openRouterRuntime, ollamaRuntime } = await createFixture();
+
+    await runtimeManager.setProvider({
+      provider: "nvidia",
+      apiKey: "nvapi-test-key",
+      modelId: "meta/llama-3.3-70b-instruct",
+    });
+
+    const session = runtimeManager.createSession();
+    expect(session.provider).toBe("nvidia");
+    expect(runtimeManager.getProviderConfig()?.provider).toBe("nvidia");
+
+    await runtimeManager.startTask(session.sessionId, "hi");
+    expect(nvidiaRuntime.sendMessage).toHaveBeenCalledTimes(1);
+    expect(nvidiaRuntime.sendMessage.mock.calls[0][0].modelId).toBe("meta/llama-3.3-70b-instruct");
+    expect(geminiRuntime.sendMessage).not.toHaveBeenCalled();
+    expect(openRouterRuntime.sendMessage).not.toHaveBeenCalled();
+    expect(ollamaRuntime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("17. No silent fallback: missing NVIDIA API key throws instead of running another provider", async () => {
+    const { runtimeManager, nvidiaRuntime, ollamaRuntime } = await createFixture();
+
+    await runtimeManager.setProvider({ provider: "nvidia", apiKey: "", modelId: "meta/llama-3.3-70b-instruct" });
+    const session = runtimeManager.createSession();
+
+    await expect(runtimeManager.startTask(session.sessionId, "hi")).rejects.toThrow(
+      /NVIDIA API key is missing/,
+    );
+    expect(nvidiaRuntime.sendMessage).not.toHaveBeenCalled();
+    expect(ollamaRuntime.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("18. Restoring a checkpoint does NOT switch an explicit NVIDIA selection away", async () => {
+    const { runtimeManager, nvidiaRuntime, ollamaRuntime } = await createFixture();
+
+    await runtimeManager.setProvider({ provider: "nvidia", apiKey: "nvapi-valid", modelId: "meta/llama-3.3-70b-instruct" });
+    const session = runtimeManager.createSession();
+    await runtimeManager.startTask(session.sessionId, "hi");
+    expect(nvidiaRuntime.sendMessage).toHaveBeenCalledTimes(1);
+
+    const checkpoints = runtimeManager.listCheckpoints(session.sessionId);
+    expect(checkpoints.length).toBeGreaterThan(0);
+    await runtimeManager.restoreCheckpoint(checkpoints[0].id);
+
+    expect(runtimeManager.provider).toBe("nvidia");
+    expect(runtimeManager.getProviderConfig()?.modelId).toBe("meta/llama-3.3-70b-instruct");
+
+    await runtimeManager.startTask(session.sessionId, "again");
+    expect(nvidiaRuntime.sendMessage).toHaveBeenCalledTimes(2);
+    expect(ollamaRuntime.sendMessage).not.toHaveBeenCalled();
   });
 });

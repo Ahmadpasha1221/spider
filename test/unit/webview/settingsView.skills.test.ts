@@ -13,6 +13,16 @@ describe("SettingsView - Agent Skills Section", () => {
     onRefreshOpenRouter: vi.fn(),
     onOpenRouterModel: vi.fn(),
     onOpenRouterSearch: vi.fn(),
+    onGeminiConnect: vi.fn(),
+    onGeminiDisconnect: vi.fn(),
+    onRefreshGemini: vi.fn(),
+    onGeminiModel: vi.fn(),
+    onGeminiSearch: vi.fn(),
+    onNvidiaConnect: vi.fn(),
+    onNvidiaDisconnect: vi.fn(),
+    onRefreshNvidia: vi.fn(),
+    onNvidiaModel: vi.fn(),
+    onNvidiaSearch: vi.fn(),
     onLocalProvider: vi.fn(),
     onRefreshLocal: vi.fn(),
     onLocalConnect: vi.fn(),
@@ -167,6 +177,38 @@ describe("SettingsView - Agent Skills Section", () => {
     const cards = root.querySelectorAll(".skill-card");
     expect(cards.length).toBe(1);
     expect(cards[0]?.querySelector(".skill-name")?.textContent).toBe("docker-build");
+  });
+
+  it("renders the Gemini provider card when Gemini is selected", () => {
+    const root = document.createElement("div");
+    const feedback = document.createElement("div");
+    const state = createInitialState();
+    state.settingsSection = "models";
+    state.provider = "gemini";
+
+    renderSettingsView(root, feedback, state, dummyHandlers);
+
+    const select = root.querySelector<HTMLSelectElement>(".select-control");
+    expect(Array.from(select?.options ?? []).some((option) => option.value === "gemini")).toBe(true);
+    expect(root.querySelector("#gemini-api-key")).not.toBeNull();
+    expect(root.querySelector("#gemini-model-select")).not.toBeNull();
+    expect(root.textContent).toContain("Google Gemini");
+  });
+
+  it("renders the NVIDIA provider card when NVIDIA is selected", () => {
+    const root = document.createElement("div");
+    const feedback = document.createElement("div");
+    const state = createInitialState();
+    state.settingsSection = "models";
+    state.provider = "nvidia";
+
+    renderSettingsView(root, feedback, state, dummyHandlers);
+
+    const select = root.querySelector<HTMLSelectElement>(".select-control");
+    expect(Array.from(select?.options ?? []).some((option) => option.value === "nvidia")).toBe(true);
+    expect(root.querySelector("#nvidia-api-key")).not.toBeNull();
+    expect(root.querySelector("#nvidia-model-select")).not.toBeNull();
+    expect(root.textContent).toContain("NVIDIA");
   });
 
   it("handles search input and reload button clicks", () => {

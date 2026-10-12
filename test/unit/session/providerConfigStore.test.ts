@@ -214,6 +214,30 @@ describe("RuntimeManager provider restore", () => {
           cancel: vi.fn(async () => undefined),
           dispose: vi.fn(),
         },
+        {
+          provider: "gemini",
+          family: "inference",
+          configure,
+          checkAvailability: vi.fn(async () => ({ available: true, status: "connected" as const })),
+          discoverModels: vi.fn(async () => []),
+          createSession: vi.fn(async () => ({})),
+          resumeSession: vi.fn(async () => ({})),
+          sendMessage: vi.fn(async () => undefined),
+          cancel: vi.fn(async () => undefined),
+          dispose: vi.fn(),
+        },
+        {
+          provider: "nvidia",
+          family: "inference",
+          configure,
+          checkAvailability: vi.fn(async () => ({ available: true, status: "connected" as const })),
+          discoverModels: vi.fn(async () => []),
+          createSession: vi.fn(async () => ({})),
+          resumeSession: vi.fn(async () => ({})),
+          sendMessage: vi.fn(async () => undefined),
+          cancel: vi.fn(async () => undefined),
+          dispose: vi.fn(),
+        },
       ],
       toolExecutor: new WorkspaceToolExecutor(),
       defaultWorkspacePath: root,
@@ -280,6 +304,63 @@ describe("RuntimeManager provider restore", () => {
     });
     // The secret is only ever in memory / SecretStorage, never in the Memento.
     expect(JSON.stringify(memento)).not.toContain("sk-or-restored");
+  });
+
+  it("restores a credential-backed Gemini profile and re-attaches only the resolved secret", async () => {
+    const memento: Record<string, unknown> = {
+      [LEGACY_KEY]: { provider: "gemini", modelId: "gemini-3.8-flash" },
+    };
+    const manager = makeManager(memento);
+
+    const restored = await manager.restoreProviderConfig();
+    expect(restored).toEqual({
+      applied: false,
+      config: {
+        profileId: "gemini-default",
+        provider: "gemini",
+        modelId: "gemini-3.8-flash",
+      },
+    });
+
+    await manager.completeRestore(restored!.config, "AIza-restored");
+
+    expect(manager.provider).toBe("gemini");
+    expect(manager.getProviderConfig()).toMatchObject({
+      provider: "gemini",
+      profileId: "gemini-default",
+      modelId: "gemini-3.8-flash",
+      apiKey: "AIza-restored",
+    });
+    // The secret is only ever in memory / SecretStorage, never in the Memento.
+    expect(JSON.stringify(memento)).not.toContain("AIza-restored");
+  });
+
+  it("restores a credential-backed NVIDIA profile and re-attaches only the resolved secret", async () => {
+    const memento: Record<string, unknown> = {
+      [LEGACY_KEY]: { provider: "nvidia", modelId: "meta/llama-3.3-70b-instruct" },
+    };
+    const manager = makeManager(memento);
+
+    const restored = await manager.restoreProviderConfig();
+    expect(restored).toEqual({
+      applied: false,
+      config: {
+        profileId: "nvidia-default",
+        provider: "nvidia",
+        modelId: "meta/llama-3.3-70b-instruct",
+      },
+    });
+
+    await manager.completeRestore(restored!.config, "nvapi-restored");
+
+    expect(manager.provider).toBe("nvidia");
+    expect(manager.getProviderConfig()).toMatchObject({
+      provider: "nvidia",
+      profileId: "nvidia-default",
+      modelId: "meta/llama-3.3-70b-instruct",
+      apiKey: "nvapi-restored",
+    });
+    expect(JSON.stringify(memento)).not.toContain("nvapi-restored");
   });
 
   it("returns undefined when no provider was saved", async () => {

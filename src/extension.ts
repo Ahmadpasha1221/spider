@@ -23,6 +23,8 @@ import { MockRuntime } from "./runtime/mock/mockRuntime";
 import { OllamaRuntime } from "./runtime/ollama/ollamaRuntime";
 import { OpenAICompatibleRuntime } from "./runtime/openaiCompatible/openaiCompatibleRuntime";
 import { OpenRouterRuntime } from "./runtime/openrouter/openRouterRuntime";
+import { GeminiRuntime } from "./runtime/gemini/geminiRuntime";
+import { NvidiaRuntime } from "./runtime/nvidia/nvidiaRuntime";
 import { WorkspaceToolExecutor } from "./runtime/tools/workspaceToolExecutor";
 import { ExecutionManager } from "./runtime/execution/executionManager";
 import { WorkspaceRulesService } from "./agent/workspaceRulesService";
@@ -141,7 +143,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const runtimeManager = new RuntimeManager({
     sessionStore,
     permissionManager,
-    runtimes: [new OllamaRuntime(), new OpenAICompatibleRuntime(), new OpenRouterRuntime(), new MockRuntime()],
+    runtimes: [
+      new OllamaRuntime(),
+      new OpenAICompatibleRuntime(),
+      new OpenRouterRuntime(),
+      new GeminiRuntime(),
+      new NvidiaRuntime(),
+      new MockRuntime(),
+    ],
     logger,
     toolExecutor,
     backgroundProcesses,

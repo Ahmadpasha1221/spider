@@ -91,6 +91,12 @@ export interface AppState {
   openRouterModels: ModelInfo[];
   openRouterLoading: boolean;
   openRouterModelFilter: string;
+  geminiModels: ModelInfo[];
+  geminiLoading: boolean;
+  geminiModelFilter: string;
+  nvidiaModels: ModelInfo[];
+  nvidiaLoading: boolean;
+  nvidiaModelFilter: string;
   runtimeConnected: boolean;
   runtimeError?: string;
   authStatus: AuthStatus;
@@ -143,6 +149,12 @@ export function createInitialState(): AppState {
     openRouterModels: [],
     openRouterLoading: false,
     openRouterModelFilter: "",
+    geminiModels: [],
+    geminiLoading: false,
+    geminiModelFilter: "",
+    nvidiaModels: [],
+    nvidiaLoading: false,
+    nvidiaModelFilter: "",
     runtimeConnected: false,
     authStatus: "disconnected",
     hasKey: false,

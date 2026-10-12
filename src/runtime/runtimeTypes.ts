@@ -8,7 +8,7 @@ import type {
 } from "./userInteraction/userQuestionBroker";
 import type { ValidationGate } from "./validation/validationGate";
 
-export type RuntimeProvider = "cursor" | "ollama" | "openai-compatible" | "openrouter" | "mock";
+export type RuntimeProvider = "cursor" | "ollama" | "openai-compatible" | "openrouter" | "gemini" | "nvidia" | "mock";
 
 export type RuntimeProviderFamily = "agent" | "inference" | "mock";
 
@@ -305,6 +305,18 @@ export type OpenRouterRuntimeConfig = {
   readonly apiKey?: string;
 };
 
+export type GeminiRuntimeConfig = {
+  readonly provider: "gemini";
+  readonly modelId?: string;
+  readonly apiKey?: string;
+};
+
+export type NvidiaRuntimeConfig = {
+  readonly provider: "nvidia";
+  readonly modelId?: string;
+  readonly apiKey?: string;
+};
+
 export type MockRuntimeConfig = {
   readonly provider: "mock";
   readonly scenario?: MockRuntimeScenario;
@@ -327,6 +339,8 @@ export type RuntimeProviderConfig =
   | OllamaRuntimeConfig
   | OpenAICompatibleRuntimeConfig
   | OpenRouterRuntimeConfig
+  | GeminiRuntimeConfig
+  | NvidiaRuntimeConfig
   | MockRuntimeConfig;
 
 export interface ResolvedRuntimeConfig {

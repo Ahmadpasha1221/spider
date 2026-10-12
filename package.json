@@ -3,7 +3,7 @@
   "displayName": "Spider",
   "version": "0.1.0",
   "publisher": "Ahmadpasha1221",
-  "description": "An autonomous AI coding agent for VS Code. Use your own model through Ollama, OpenAI-compatible servers, OpenRouter, or Cursor agents, with workspace tools, permissions, streaming, planning, and verification.",
+  "description": "An autonomous AI coding agent for VS Code. Use your own model through Ollama, OpenAI-compatible servers, OpenRouter, Google Gemini, NVIDIA, or Cursor agents, with workspace tools, permissions, streaming, planning, and verification.",
   "license": "MIT",
   "engines": {
     "vscode": "^1.95.0",
@@ -20,6 +20,8 @@
     "code assistant",
     "ollama",
     "openrouter",
+    "gemini",
+    "nvidia",
     "openai",
     "local ai",
     "cursor"

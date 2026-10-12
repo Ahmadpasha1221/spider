@@ -22,8 +22,17 @@ export function renderChatView(
     readyForInput: ready,
     modelOptions: composerModelOptions(state),
     modelValue: state.selectedModelId,
-    modelLoading: state.provider === "openrouter" ? state.openRouterLoading : state.localLoading,
-    modelDisabled: state.running || (state.provider === "openrouter" ? state.openRouterLoading : false),
+    modelLoading: state.provider === "openrouter"
+      ? state.openRouterLoading
+      : state.provider === "gemini"
+        ? state.geminiLoading
+        : state.provider === "nvidia"
+          ? state.nvidiaLoading
+          : state.localLoading,
+    modelDisabled: state.running
+      || (state.provider === "openrouter" && state.openRouterLoading)
+      || (state.provider === "gemini" && state.geminiLoading)
+      || (state.provider === "nvidia" && state.nvidiaLoading),
     autoApproveEnabled: state.autoApproveEnabled,
     shieldVisible: ready && Boolean(state.activeSessionId),
   });
@@ -47,6 +56,24 @@ function composerModelOptions(state: AppState): readonly ComposerModelOption[] {
       name: model.name,
       detail: model.contextWindow !== undefined ? `${model.name === model.id ? "" : `${model.id} · `}${formatContext(model.contextWindow)}` : undefined,
     }));
+  }
+  if (state.provider === "gemini") {
+    const filtered = state.geminiModelFilter.trim().length === 0
+      ? state.geminiModels
+      : state.geminiModels.filter((model) => {
+        const query = state.geminiModelFilter.toLowerCase();
+        return model.id.toLowerCase().includes(query) || model.name.toLowerCase().includes(query);
+      });
+    return filtered.slice(0, 200).map((model) => ({ id: model.id, name: model.name }));
+  }
+  if (state.provider === "nvidia") {
+    const filtered = state.nvidiaModelFilter.trim().length === 0
+      ? state.nvidiaModels
+      : state.nvidiaModels.filter((model) => {
+        const query = state.nvidiaModelFilter.toLowerCase();
+        return model.id.toLowerCase().includes(query) || model.name.toLowerCase().includes(query);
+      });
+    return filtered.slice(0, 200).map((model) => ({ id: model.id, name: model.name }));
   }
   if (state.provider === "local") {
     return state.localModels.map((model) => ({ id: model.id, name: model.name }));

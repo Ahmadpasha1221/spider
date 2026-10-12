@@ -4,7 +4,7 @@ import type { PermissionRule, PermissionRuleCategory } from "./permissionRules";
 
 export type { PermissionRule, PermissionRuleCategory } from "./permissionRules";
 
-export type GuiRuntimeProvider = "cursor" | "local" | "mock" | "openrouter";
+export type GuiRuntimeProvider = "cursor" | "local" | "mock" | "openrouter" | "gemini" | "nvidia";
 export type LocalProvider = "ollama" | "openai-compatible";
 
 export type WebviewMessage =
@@ -25,6 +25,14 @@ export type WebviewMessage =
   | { type: "DISCONNECT_OPENROUTER" }
   | { type: "DISCOVER_OPENROUTER_MODELS" }
   | { type: "SELECT_OPENROUTER_MODEL"; modelId: string }
+  | { type: "CONNECT_GEMINI"; apiKey: string }
+  | { type: "DISCONNECT_GEMINI" }
+  | { type: "DISCOVER_GEMINI_MODELS" }
+  | { type: "SELECT_GEMINI_MODEL"; modelId: string }
+  | { type: "CONNECT_NVIDIA"; apiKey: string }
+  | { type: "DISCONNECT_NVIDIA" }
+  | { type: "DISCOVER_NVIDIA_MODELS" }
+  | { type: "SELECT_NVIDIA_MODEL"; modelId: string }
   | { type: "DISCONNECT_CURSOR" }
   | { type: "GET_AUTH_STATUS" }
   | { type: "GET_RUNTIME_STATUS" }
@@ -92,6 +100,18 @@ export interface ModelOption {
 
 export interface OpenRouterModelListMessage {
   type: "OPENROUTER_MODELS";
+  models: ModelOption[];
+  error?: string;
+}
+
+export interface GeminiModelListMessage {
+  type: "GEMINI_MODELS";
+  models: ModelOption[];
+  error?: string;
+}
+
+export interface NvidiaModelListMessage {
+  type: "NVIDIA_MODELS";
   models: ModelOption[];
   error?: string;
 }
@@ -222,6 +242,8 @@ export type ExtensionMessage =
     }
   | { type: "LOCAL_MODELS"; provider: LocalProvider; models: LocalModelInfo[]; error?: string }
   | OpenRouterModelListMessage
+  | GeminiModelListMessage
+  | NvidiaModelListMessage
   | { type: "SHOW_SETTINGS" }
   | { type: "RUN_STARTED"; runId: string }
   | { type: "RUN_COMPLETED"; runId: string }

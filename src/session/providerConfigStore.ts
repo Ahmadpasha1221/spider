@@ -44,6 +44,8 @@ const PROVIDER_LABELS: Record<RuntimeProviderConfig["provider"], string> = {
   ollama: "Ollama",
   "openai-compatible": "OpenAI-compatible",
   openrouter: "OpenRouter",
+  gemini: "Google Gemini",
+  nvidia: "NVIDIA",
   mock: "Mock",
 };
 

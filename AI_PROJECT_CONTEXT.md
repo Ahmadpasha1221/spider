@@ -627,6 +627,69 @@ message lacks `tool_call_id` or ids don't match the assistant turn — and the
 malformed turn then poisons every later request in the session. Never strip
 or regenerate tool-call ids.
 
+## 8b. Google Gemini
+
+- Base URL: `https://generativelanguage.googleapis.com/v1beta/openai`
+  (`GEMINI_BASE_URL`), fixed — provider identity owns the official
+  OpenAI-compatible endpoint (`baseUrlEditable: false`); it is NOT a
+  user-editable arbitrary endpoint.
+- Auth: `Authorization: Bearer <Gemini API key>` (Google AI Studio key). The
+  key is stored per profile in VS Code SecretStorage
+  (`spider.provider.gemini-default.apiKey`); no legacy single-key slot exists.
+- `src/runtime/gemini/geminiRuntime.ts` composes `OpenAICompatibleRuntime` for
+  transport (same histories map, `toOpenAiMessages`, SSE stream) and owns
+  catalog discovery + error taxonomy. Provider identity is always `gemini`.
+- Model discovery: live `GET /models` (OpenAI-compatible shape) →
+  `RuntimeModel[]` tagged `gemini`. Non-chat model ids (embedding, image,
+  audio/TTS/live, transcribe, veo/lyria, robotics, computer-use,
+  deep-research, antigravity, omni) are filtered by `isChatCapableGeminiModel`.
+  Capabilities are the compatibility layer's documented guarantees for chat
+  (streaming, toolCalling, structuredOutput); `vision` is deliberately left
+  undefined because the compat catalog does not carry per-model metadata. Never
+  infer capabilities from a model name.
+- Errors: 401/403 → `authentication_failed`; 400 → `invalid_configuration`;
+  404 → `model_unavailable`; 429 → retryable `provider_unavailable`; 5xx →
+  retryable; missing key → `authentication_failed` before any request.
+- Credentials are `CREDENTIAL_PROVIDERS` (returned unapplied by
+  `restoreProviderConfig`, re-attached by `extension.ts`/`completeRestore`).
+  Never fall back to another provider on a missing key.
+- Tests: `test/unit/runtime/gemini/geminiRuntime.test.ts`,
+  `test/unit/webview/messageRouter.gemini.test.ts`, plus Gemini cases in
+  `providerArchitecture.integration.test.ts` and `providerConfigStore.test.ts`.
+
+## 8c. NVIDIA
+
+- Base URL: `https://integrate.api.nvidia.com/v1` (`NVIDIA_BASE_URL`), fixed —
+  provider identity owns the cloud-hosted NVIDIA API Catalog. NOT a self-hosted
+  NIM container or a local OpenAI-compatible server.
+- Auth: `Authorization: Bearer <NVIDIA API key>` (key from build.nvidia.com).
+  Stored per profile in VS Code SecretStorage
+  (`spider.provider.nvidia-default.apiKey`); no legacy single-key slot.
+- `src/runtime/nvidia/nvidiaRuntime.ts` composes `OpenAICompatibleRuntime` for
+  transport and owns catalog discovery + error taxonomy. Provider identity is
+  always `nvidia`.
+- Model discovery: live `GET /models` (accepts the OpenAI `{ data: [...] }`
+  envelope and a bare array) → `RuntimeModel[]` tagged `nvidia`.
+  `isChatCapableNvidiaModel` filters non-chat task models (embed, rerank, speech,
+  image/video, detection, bio) — never by vendor name (partner families like
+  `meta/`, `qwen/`, `mistralai/` are kept).
+- Capabilities are deliberately conservative: `streaming: true` only.
+  `toolCalling`/`structuredOutput` are false because the catalog exposes no
+  per-model metadata and NVIDIA documents function calling as model-dependent;
+  `sendMessage` therefore defaults `nativeTools` to false and Spider's existing
+  text-tool fallback contract is used. Enable native tools only after verifying
+  a specific model's behavior.
+- Errors: 401/403 → `authentication_failed`; 400 → `invalid_configuration`;
+  402 → non-retryable `provider_unavailable` (quota); 404 → `model_unavailable`;
+  429 → retryable `provider_unavailable`; 5xx → retryable; missing key →
+  `authentication_failed` before any request.
+- Credentials are `CREDENTIAL_PROVIDERS` (returned unapplied by
+  `restoreProviderConfig`, re-attached by `extension.ts`/`completeRestore`).
+  Never fall back to another provider on a missing key.
+- Tests: `test/unit/runtime/nvidia/nvidiaRuntime.test.ts`,
+  `test/unit/webview/messageRouter.nvidia.test.ts`, plus NVIDIA cases in
+  `providerArchitecture.integration.test.ts` and `providerConfigStore.test.ts`.
+
 ## 9. Ollama
 
 - `src/runtime/ollama/ollamaRuntime.ts` — independent implementation using
