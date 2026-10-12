@@ -223,6 +223,12 @@ function handleHostMessage(message: HostToGui): void {
       if (message.provider === "openrouter" && message.connected && state.openRouterModels.length === 0 && !state.openRouterLoading) {
         discoverOpenRouterModels();
       }
+      if (message.provider === "gemini" && message.connected && state.geminiModels.length === 0 && !state.geminiLoading) {
+        discoverGeminiModels();
+      }
+      if (message.provider === "nvidia" && message.connected && state.nvidiaModels.length === 0 && !state.nvidiaLoading) {
+        discoverNvidiaModels();
+      }
       break;
     case "LOCAL_MODELS":
       state.localLoading = false;
@@ -245,6 +251,34 @@ function handleHostMessage(message: HostToGui): void {
       state.runtimeError = message.error;
       if (message.models.length > 0 && !message.error) {
         state.provider = "openrouter";
+        state.runtimeConnected = true;
+        if (!state.selectedModelId && message.models[0]) {
+          state.selectedModelId = message.models[0].id;
+          state.selectedModelName = message.models[0].name;
+        }
+        ensureSession();
+      }
+      break;
+    case "GEMINI_MODELS":
+      state.geminiLoading = false;
+      state.geminiModels = message.models;
+      state.runtimeError = message.error;
+      if (message.models.length > 0 && !message.error) {
+        state.provider = "gemini";
+        state.runtimeConnected = true;
+        if (!state.selectedModelId && message.models[0]) {
+          state.selectedModelId = message.models[0].id;
+          state.selectedModelName = message.models[0].name;
+        }
+        ensureSession();
+      }
+      break;
+    case "NVIDIA_MODELS":
+      state.nvidiaLoading = false;
+      state.nvidiaModels = message.models;
+      state.runtimeError = message.error;
+      if (message.models.length > 0 && !message.error) {
+        state.provider = "nvidia";
         state.runtimeConnected = true;
         if (!state.selectedModelId && message.models[0]) {
           state.selectedModelId = message.models[0].id;
@@ -772,6 +806,12 @@ function renderSettingsViewGuarded(): void {
     openRouterModels: state.openRouterModels.slice(0, 200).map((model) => model.id),
     openRouterFilter: state.openRouterModelFilter,
     openRouterLoading: state.openRouterLoading,
+    geminiModels: state.geminiModels.slice(0, 200).map((model) => model.id),
+    geminiFilter: state.geminiModelFilter,
+    geminiLoading: state.geminiLoading,
+    nvidiaModels: state.nvidiaModels.slice(0, 200).map((model) => model.id),
+    nvidiaFilter: state.nvidiaModelFilter,
+    nvidiaLoading: state.nvidiaLoading,
     connected: state.runtimeConnected,
     runtimeError: state.runtimeError,
     auth: [state.authStatus, state.hasKey, state.connecting, state.authError, state.authMessage],
@@ -826,6 +866,46 @@ function renderSettingsViewGuarded(): void {
       },
       onOpenRouterSearch: (query) => {
         state.openRouterModelFilter = query;
+        render();
+      },
+      onGeminiConnect: (apiKey) => {
+        state.geminiLoading = true;
+        state.runtimeError = undefined;
+        postToHost({ type: "CONNECT_GEMINI", apiKey });
+        render();
+      },
+      onGeminiDisconnect: () => {
+        state.runtimeConnected = false;
+        state.geminiModels = [];
+        postToHost({ type: "DISCONNECT_GEMINI" });
+        render();
+      },
+      onRefreshGemini: discoverGeminiModels,
+      onGeminiModel: (modelId) => {
+        selectModel(modelId);
+      },
+      onGeminiSearch: (query) => {
+        state.geminiModelFilter = query;
+        render();
+      },
+      onNvidiaConnect: (apiKey) => {
+        state.nvidiaLoading = true;
+        state.runtimeError = undefined;
+        postToHost({ type: "CONNECT_NVIDIA", apiKey });
+        render();
+      },
+      onNvidiaDisconnect: () => {
+        state.runtimeConnected = false;
+        state.nvidiaModels = [];
+        postToHost({ type: "DISCONNECT_NVIDIA" });
+        render();
+      },
+      onRefreshNvidia: discoverNvidiaModels,
+      onNvidiaModel: (modelId) => {
+        selectModel(modelId);
+      },
+      onNvidiaSearch: (query) => {
+        state.nvidiaModelFilter = query;
         render();
       },
       onLocalProvider: (provider) => {
@@ -895,6 +975,14 @@ function selectModel(modelId: string): void {
     state.selectedModelId = modelId;
     state.selectedModelName = state.openRouterModels.find((model) => model.id === modelId)?.name ?? modelId;
     postToHost({ type: "SELECT_OPENROUTER_MODEL", modelId });
+  } else if (state.provider === "gemini") {
+    state.selectedModelId = modelId;
+    state.selectedModelName = state.geminiModels.find((model) => model.id === modelId)?.name ?? modelId;
+    postToHost({ type: "SELECT_GEMINI_MODEL", modelId });
+  } else if (state.provider === "nvidia") {
+    state.selectedModelId = modelId;
+    state.selectedModelName = state.nvidiaModels.find((model) => model.id === modelId)?.name ?? modelId;
+    postToHost({ type: "SELECT_NVIDIA_MODEL", modelId });
   } else if (state.provider === "local") {
     state.selectedModelId = modelId;
     state.selectedModelName = state.localModels.find((model) => model.id === modelId)?.name ?? modelId;
@@ -950,6 +1038,10 @@ function selectProvider(provider: RuntimeProvider): void {
     if (state.hasKey) {
       discoverOpenRouterModels();
     }
+  } else if (provider === "gemini") {
+    postToHost({ type: "SELECT_RUNTIME", provider });
+  } else if (provider === "nvidia") {
+    postToHost({ type: "SELECT_RUNTIME", provider });
   } else if (provider === "mock") {
     state.runtimeConnected = true;
     postToHost({ type: "USE_MOCK_RUNTIME" });
@@ -974,6 +1066,20 @@ function discoverOpenRouterModels(): void {
   render();
 }
 
+function discoverGeminiModels(): void {
+  state.geminiLoading = true;
+  state.runtimeError = undefined;
+  postToHost({ type: "DISCOVER_GEMINI_MODELS" });
+  render();
+}
+
+function discoverNvidiaModels(): void {
+  state.nvidiaLoading = true;
+  state.runtimeError = undefined;
+  postToHost({ type: "DISCOVER_NVIDIA_MODELS" });
+  render();
+}
+
 function ensureSession(): void {
   if (state.sessions.length === 0 && !state.pendingNewConversation) postToHost({ type: "NEW_SESSION" });
 }
@@ -983,7 +1089,9 @@ function renderSetupBanner(): void {
     state.runtimeConnected
     || state.provider === "mock"
     || (state.provider === "local" && Boolean(state.selectedModelId || state.selectedModelName) && !state.runtimeError)
-    || (state.provider === "openrouter" && Boolean(state.selectedModelId) && !state.runtimeError);
+    || (state.provider === "openrouter" && Boolean(state.selectedModelId) && !state.runtimeError)
+    || (state.provider === "gemini" && Boolean(state.selectedModelId) && !state.runtimeError)
+    || (state.provider === "nvidia" && Boolean(state.selectedModelId) && !state.runtimeError);
   // Fingerprinted like settings: rebuilding this banner on every event burst
   // destroyed its button under the pointer.
   const fingerprint = JSON.stringify({ ready, provider: state.provider, error: state.runtimeError });

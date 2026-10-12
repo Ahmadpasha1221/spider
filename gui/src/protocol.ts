@@ -1,5 +1,5 @@
 export type AuthStatus = "disconnected" | "connecting" | "connected" | "error";
-export type RuntimeProvider = "cursor" | "local" | "mock" | "openrouter";
+export type RuntimeProvider = "cursor" | "local" | "mock" | "openrouter" | "gemini" | "nvidia";
 export type LocalProvider = "ollama" | "openai-compatible";
 
 export interface LocalModel {
@@ -34,6 +34,14 @@ export type GuiToHost =
   | { type: "DISCONNECT_OPENROUTER" }
   | { type: "DISCOVER_OPENROUTER_MODELS" }
   | { type: "SELECT_OPENROUTER_MODEL"; modelId: string }
+  | { type: "CONNECT_GEMINI"; apiKey: string }
+  | { type: "DISCONNECT_GEMINI" }
+  | { type: "DISCOVER_GEMINI_MODELS" }
+  | { type: "SELECT_GEMINI_MODEL"; modelId: string }
+  | { type: "CONNECT_NVIDIA"; apiKey: string }
+  | { type: "DISCONNECT_NVIDIA" }
+  | { type: "DISCOVER_NVIDIA_MODELS" }
+  | { type: "SELECT_NVIDIA_MODEL"; modelId: string }
   | { type: "GET_AUTH_STATUS" }
   | { type: "LIST_SESSIONS" }
   /** Opens the conversation History editor tab. */
@@ -201,6 +209,8 @@ export type HostToGui =
   | { type: "RUNTIME_STATUS"; provider: RuntimeProvider; connected: boolean; modelId?: string; modelName?: string; localProvider?: LocalProvider; error?: string }
   | { type: "LOCAL_MODELS"; provider: LocalProvider; models: LocalModel[]; error?: string }
   | { type: "OPENROUTER_MODELS"; models: ModelInfo[]; error?: string }
+  | { type: "GEMINI_MODELS"; models: ModelInfo[]; error?: string }
+  | { type: "NVIDIA_MODELS"; models: ModelInfo[]; error?: string }
   | { type: "SHOW_SETTINGS" }
   | {
       type: "TRANSCRIPT";

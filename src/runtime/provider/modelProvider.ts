@@ -236,6 +236,24 @@ export class ModelProviderFactory {
       }
       return { valid: true };
     }
+    if (config.provider === "gemini") {
+      if (!config.apiKey || config.apiKey.trim().length === 0) {
+        return {
+          valid: false,
+          error: "Gemini API key is missing. Add your Gemini API key in Settings.",
+        };
+      }
+      return { valid: true };
+    }
+    if (config.provider === "nvidia") {
+      if (!config.apiKey || config.apiKey.trim().length === 0) {
+        return {
+          valid: false,
+          error: "NVIDIA API key is missing. Add your NVIDIA API key in Settings.",
+        };
+      }
+      return { valid: true };
+    }
     if (config.provider === "ollama") {
       return { valid: true };
     }

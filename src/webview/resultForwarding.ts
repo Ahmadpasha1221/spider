@@ -14,6 +14,8 @@ export function shouldForwardResult(type: ExtensionMessage["type"]): boolean {
     || type === "RUNTIME_STATUS"
     || type === "LOCAL_MODELS"
     || type === "OPENROUTER_MODELS"
+    || type === "GEMINI_MODELS"
+    || type === "NVIDIA_MODELS"
     || type === "TRANSCRIPT"
     || type === "TODO_UPDATED"
     || type === "CHECKPOINTS"

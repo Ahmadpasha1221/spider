@@ -111,11 +111,17 @@ interface ActiveRun {
  * caller must re-attach a credential from SecretStorage first. Everything else
  * is applied during `restoreProviderConfig()`.
  */
-const CREDENTIAL_PROVIDERS: ReadonlySet<RuntimeProviderConfig["provider"]> = new Set(["openrouter"]);
+const CREDENTIAL_PROVIDERS: ReadonlySet<RuntimeProviderConfig["provider"]> = new Set(["openrouter", "gemini", "nvidia"]);
 
 /** Attaches a credential to a config whose runtime declares an apiKey slot. */
 function withApiKey(config: RuntimeProviderConfig, credential: string): RuntimeProviderConfig {
   if (config.provider === "openrouter") {
+    return { ...config, apiKey: credential };
+  }
+  if (config.provider === "gemini") {
+    return { ...config, apiKey: credential };
+  }
+  if (config.provider === "nvidia") {
     return { ...config, apiKey: credential };
   }
   if (config.provider === "openai-compatible") {
@@ -735,6 +741,22 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
       };
     }
     if (config.provider === "openrouter") {
+      return {
+        ...identity,
+        provider: config.provider,
+        modelId: config.modelId,
+        ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      };
+    }
+    if (config.provider === "gemini") {
+      return {
+        ...identity,
+        provider: config.provider,
+        modelId: config.modelId,
+        ...(config.apiKey ? { apiKey: config.apiKey } : {}),
+      };
+    }
+    if (config.provider === "nvidia") {
       return {
         ...identity,
         provider: config.provider,
@@ -1798,6 +1820,16 @@ export class RuntimeManager implements vscode.Disposable, SubagentRunner {
           ...(saved.modelId ? { modelId: saved.modelId } : {}),
         };
       case "openrouter":
+        return {
+          provider: saved.provider,
+          ...(saved.modelId ? { modelId: saved.modelId } : {}),
+        };
+      case "gemini":
+        return {
+          provider: saved.provider,
+          ...(saved.modelId ? { modelId: saved.modelId } : {}),
+        };
+      case "nvidia":
         return {
           provider: saved.provider,
           ...(saved.modelId ? { modelId: saved.modelId } : {}),

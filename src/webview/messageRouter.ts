@@ -64,6 +64,8 @@ export class MessageRouter {
       provider === "ollama"
       || provider === "openai-compatible"
       || provider === "openrouter"
+      || provider === "gemini"
+      || provider === "nvidia"
       || provider === "mock"
     );
   }
@@ -328,6 +330,46 @@ export class MessageRouter {
         return this.discoverOpenRouterModels();
       case "SELECT_OPENROUTER_MODEL":
         return this.selectOpenRouterModel(typed.modelId);
+      case "CONNECT_GEMINI": {
+        if (!this.runtimeManager || !this.providerCredentials) {
+          return { type: "RUNTIME_STATUS", provider: "gemini", connected: false, error: "Gemini is not configured." } as ExtensionMessage;
+        }
+        const apiKey = typed.apiKey.trim();
+        if (apiKey.length === 0) {
+          return { type: "RUNTIME_STATUS", provider: "gemini", connected: false, error: "Enter a Gemini API key first." } as ExtensionMessage;
+        }
+        await this.providerCredentials.store(this.geminiProfileId(), apiKey);
+        await this.connectGemini(apiKey);
+        return this.geminiStatus();
+      }
+      case "DISCONNECT_GEMINI": {
+        await this.providerCredentials?.delete(this.geminiProfileId());
+        return this.geminiStatus(true);
+      }
+      case "DISCOVER_GEMINI_MODELS":
+        return this.discoverGeminiModels();
+      case "SELECT_GEMINI_MODEL":
+        return this.selectGeminiModel(typed.modelId);
+      case "CONNECT_NVIDIA": {
+        if (!this.runtimeManager || !this.providerCredentials) {
+          return { type: "RUNTIME_STATUS", provider: "nvidia", connected: false, error: "NVIDIA is not configured." } as ExtensionMessage;
+        }
+        const apiKey = typed.apiKey.trim();
+        if (apiKey.length === 0) {
+          return { type: "RUNTIME_STATUS", provider: "nvidia", connected: false, error: "Enter an NVIDIA API key first." } as ExtensionMessage;
+        }
+        await this.providerCredentials.store(this.nvidiaProfileId(), apiKey);
+        await this.connectNvidia(apiKey);
+        return this.nvidiaStatus();
+      }
+      case "DISCONNECT_NVIDIA": {
+        await this.providerCredentials?.delete(this.nvidiaProfileId());
+        return this.nvidiaStatus(true);
+      }
+      case "DISCOVER_NVIDIA_MODELS":
+        return this.discoverNvidiaModels();
+      case "SELECT_NVIDIA_MODEL":
+        return this.selectNvidiaModel(typed.modelId);
       case "DISCOVER_LOCAL_MODELS":
         return this.discoverLocalModels(typed.provider ?? "ollama");
       case "CONNECT_LOCAL":
@@ -502,6 +544,12 @@ export class MessageRouter {
     if (provider === "openrouter") {
       return this.openRouterStatus(error);
     }
+    if (provider === "gemini") {
+      return this.geminiStatus(Boolean(error), error);
+    }
+    if (provider === "nvidia") {
+      return this.nvidiaStatus(Boolean(error), error);
+    }
     if (provider === "ollama" || provider === "openai-compatible") {
       return {
         type: "RUNTIME_STATUS",
@@ -630,6 +678,184 @@ export class MessageRouter {
     };
   }
 
+  /** Connects the Gemini runtime using the stored API key. */
+  private async connectGemini(apiKey: string): Promise<void> {
+    if (!this.runtimeManager) {
+      return;
+    }
+    const storedModelId = this.savedGeminiModelId();
+    await this.runtimeManager.setProvider({ provider: "gemini", apiKey, ...(storedModelId ? { modelId: storedModelId } : {}) });
+    if (this.runtimeManager.listSessions().length === 0) {
+      this.runtimeManager.createSession(this.defaultWorkspacePath);
+    }
+  }
+
+  private savedGeminiModelId(): string | undefined {
+    const config = this.runtimeManager?.getProviderConfig();
+    return config?.provider === "gemini" ? config.modelId : undefined;
+  }
+
+  private async discoverGeminiModels(): Promise<ExtensionMessage> {
+    if (!this.runtimeManager) {
+      return { type: "GEMINI_MODELS", models: [], error: "Gemini runtime is not configured." };
+    }
+    const apiKey = await this.resolveGeminiApiKey();
+    if (!apiKey) {
+      return { type: "GEMINI_MODELS", models: [], error: "Connect Gemini with an API key first." };
+    }
+    try {
+      // Switch the active runtime so discovery goes through RuntimeManager.
+      await this.runtimeManager.setProvider({ provider: "gemini", apiKey, ...(await this.geminiModelIdFor()) });
+      const models = await this.runtimeManager.discoverModels();
+      return { type: "GEMINI_MODELS", models: models.map(toModelOption) };
+    } catch (error) {
+      return {
+        type: "GEMINI_MODELS",
+        models: [],
+        error: error instanceof Error ? error.message : "Could not list Gemini models.",
+      };
+    }
+  }
+
+  private async geminiModelIdFor(): Promise<{ modelId: string } | Record<string, never>> {
+    const config = this.runtimeManager?.getProviderConfig();
+    if (config?.provider === "gemini" && config.modelId) {
+      return { modelId: config.modelId };
+    }
+    return {};
+  }
+
+  private async selectGeminiModel(modelId: string): Promise<ExtensionMessage> {
+    if (!this.runtimeManager) {
+      return this.runtimeStatus("Gemini runtime is not configured.");
+    }
+    const apiKey = await this.resolveGeminiApiKey();
+    if (!apiKey) {
+      return { type: "RUNTIME_STATUS", provider: "gemini", connected: false, error: "Connect Gemini with an API key first." };
+    }
+    await this.runtimeManager.setProvider({ provider: "gemini", apiKey, modelId });
+    if (this.runtimeManager.listSessions().length === 0) {
+      this.runtimeManager.createSession(this.defaultWorkspacePath);
+    }
+    return this.geminiStatus();
+  }
+
+  /** Profile id of the active Gemini connection (defaults to the shared one). */
+  private geminiProfileId(): string {
+    const config = this.runtimeManager?.getProviderConfig();
+    return config?.provider === "gemini" && config.profileId ? config.profileId : profileIdFor("gemini");
+  }
+
+  private async resolveGeminiApiKey(): Promise<string | undefined> {
+    const config = this.runtimeManager?.getProviderConfig();
+    if (config?.provider === "gemini" && config.apiKey) {
+      return config.apiKey;
+    }
+    return this.providerCredentials?.get(this.geminiProfileId());
+  }
+
+  private geminiStatus(disconnected = false, error?: string): ExtensionMessage {
+    const config = this.runtimeManager?.getProviderConfig();
+    const connected = !disconnected && this.runtimeManager?.provider === "gemini" && !error;
+    return {
+      type: "RUNTIME_STATUS",
+      provider: "gemini",
+      connected,
+      modelId: config?.provider === "gemini" ? config.modelId : undefined,
+      modelName: config?.provider === "gemini" ? config.modelId : undefined,
+      ...(error ? { error } : {}),
+    };
+  }
+
+  /** Connects the NVIDIA runtime using the stored API key. */
+  private async connectNvidia(apiKey: string): Promise<void> {
+    if (!this.runtimeManager) {
+      return;
+    }
+    const storedModelId = this.savedNvidiaModelId();
+    await this.runtimeManager.setProvider({ provider: "nvidia", apiKey, ...(storedModelId ? { modelId: storedModelId } : {}) });
+    if (this.runtimeManager.listSessions().length === 0) {
+      this.runtimeManager.createSession(this.defaultWorkspacePath);
+    }
+  }
+
+  private savedNvidiaModelId(): string | undefined {
+    const config = this.runtimeManager?.getProviderConfig();
+    return config?.provider === "nvidia" ? config.modelId : undefined;
+  }
+
+  private async discoverNvidiaModels(): Promise<ExtensionMessage> {
+    if (!this.runtimeManager) {
+      return { type: "NVIDIA_MODELS", models: [], error: "NVIDIA runtime is not configured." };
+    }
+    const apiKey = await this.resolveNvidiaApiKey();
+    if (!apiKey) {
+      return { type: "NVIDIA_MODELS", models: [], error: "Connect NVIDIA with an API key first." };
+    }
+    try {
+      // Switch the active runtime so discovery goes through RuntimeManager.
+      await this.runtimeManager.setProvider({ provider: "nvidia", apiKey, ...(await this.nvidiaModelIdFor()) });
+      const models = await this.runtimeManager.discoverModels();
+      return { type: "NVIDIA_MODELS", models: models.map(toModelOption) };
+    } catch (error) {
+      return {
+        type: "NVIDIA_MODELS",
+        models: [],
+        error: error instanceof Error ? error.message : "Could not list NVIDIA models.",
+      };
+    }
+  }
+
+  private async nvidiaModelIdFor(): Promise<{ modelId: string } | Record<string, never>> {
+    const config = this.runtimeManager?.getProviderConfig();
+    if (config?.provider === "nvidia" && config.modelId) {
+      return { modelId: config.modelId };
+    }
+    return {};
+  }
+
+  private async selectNvidiaModel(modelId: string): Promise<ExtensionMessage> {
+    if (!this.runtimeManager) {
+      return this.runtimeStatus("NVIDIA runtime is not configured.");
+    }
+    const apiKey = await this.resolveNvidiaApiKey();
+    if (!apiKey) {
+      return { type: "RUNTIME_STATUS", provider: "nvidia", connected: false, error: "Connect NVIDIA with an API key first." };
+    }
+    await this.runtimeManager.setProvider({ provider: "nvidia", apiKey, modelId });
+    if (this.runtimeManager.listSessions().length === 0) {
+      this.runtimeManager.createSession(this.defaultWorkspacePath);
+    }
+    return this.nvidiaStatus();
+  }
+
+  /** Profile id of the active NVIDIA connection (defaults to the shared one). */
+  private nvidiaProfileId(): string {
+    const config = this.runtimeManager?.getProviderConfig();
+    return config?.provider === "nvidia" && config.profileId ? config.profileId : profileIdFor("nvidia");
+  }
+
+  private async resolveNvidiaApiKey(): Promise<string | undefined> {
+    const config = this.runtimeManager?.getProviderConfig();
+    if (config?.provider === "nvidia" && config.apiKey) {
+      return config.apiKey;
+    }
+    return this.providerCredentials?.get(this.nvidiaProfileId());
+  }
+
+  private nvidiaStatus(disconnected = false, error?: string): ExtensionMessage {
+    const config = this.runtimeManager?.getProviderConfig();
+    const connected = !disconnected && this.runtimeManager?.provider === "nvidia" && !error;
+    return {
+      type: "RUNTIME_STATUS",
+      provider: "nvidia",
+      connected,
+      modelId: config?.provider === "nvidia" ? config.modelId : undefined,
+      modelName: config?.provider === "nvidia" ? config.modelId : undefined,
+      ...(error ? { error } : {}),
+    };
+  }
+
   private async discoverLocalModels(provider: LocalProvider): Promise<ExtensionMessage> {
     if (!this.runtimeManager) {
       return { type: "LOCAL_MODELS", provider, models: [], error: "Local runtime is not configured." };
@@ -722,6 +948,32 @@ export class MessageRouter {
       }
       await this.connectOpenRouter(apiKey);
       return this.openRouterStatus();
+    }
+    if (provider === "gemini") {
+      const apiKey = await this.resolveGeminiApiKey();
+      if (!apiKey) {
+        return {
+          type: "RUNTIME_STATUS",
+          provider: "gemini",
+          connected: false,
+          error: "Connect Gemini with an API key first.",
+        };
+      }
+      await this.connectGemini(apiKey);
+      return this.geminiStatus();
+    }
+    if (provider === "nvidia") {
+      const apiKey = await this.resolveNvidiaApiKey();
+      if (!apiKey) {
+        return {
+          type: "RUNTIME_STATUS",
+          provider: "nvidia",
+          connected: false,
+          error: "Connect NVIDIA with an API key first.",
+        };
+      }
+      await this.connectNvidia(apiKey);
+      return this.nvidiaStatus();
     }
     void modelId;
     return {
@@ -936,8 +1188,36 @@ export class MessageRouter {
           throw new Error("Invalid SELECT_OPENROUTER_MODEL message");
         }
         return message as WebviewMessage;
+      case "CONNECT_GEMINI":
+        if (typeof typed.apiKey !== "string") {
+          throw new Error("Invalid CONNECT_GEMINI message");
+        }
+        return message as WebviewMessage;
+      case "DISCONNECT_GEMINI":
+        return message as WebviewMessage;
+      case "DISCOVER_GEMINI_MODELS":
+        return message as WebviewMessage;
+      case "SELECT_GEMINI_MODEL":
+        if (typeof typed.modelId !== "string" || (typed.modelId as string).trim().length === 0) {
+          throw new Error("Invalid SELECT_GEMINI_MODEL message");
+        }
+        return message as WebviewMessage;
+      case "CONNECT_NVIDIA":
+        if (typeof typed.apiKey !== "string") {
+          throw new Error("Invalid CONNECT_NVIDIA message");
+        }
+        return message as WebviewMessage;
+      case "DISCONNECT_NVIDIA":
+        return message as WebviewMessage;
+      case "DISCOVER_NVIDIA_MODELS":
+        return message as WebviewMessage;
+      case "SELECT_NVIDIA_MODEL":
+        if (typeof typed.modelId !== "string" || (typed.modelId as string).trim().length === 0) {
+          throw new Error("Invalid SELECT_NVIDIA_MODEL message");
+        }
+        return message as WebviewMessage;
       case "SELECT_RUNTIME":
-        if (typed.provider !== "cursor" && typed.provider !== "local" && typed.provider !== "mock" && typed.provider !== "openrouter") {
+        if (typed.provider !== "cursor" && typed.provider !== "local" && typed.provider !== "mock" && typed.provider !== "openrouter" && typed.provider !== "gemini" && typed.provider !== "nvidia") {
           throw new Error("Invalid SELECT_RUNTIME message");
         }
         return message as WebviewMessage;
